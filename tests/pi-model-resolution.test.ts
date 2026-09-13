@@ -447,7 +447,7 @@ describe('pi model resolution helpers', () => {
     expect((model.compat as any)?.supportsStreaming).toBe(true);
   });
 
-  it('sets requiresThinkingInContent for DeepSeek V4 models on custom endpoints', () => {
+  it('does not set requiresThinkingInContent for DeepSeek V4 models on custom endpoints', () => {
     const model = applyPiModelRuntimeOverrides(
       {
         id: 'deepseek-v4-pro',
@@ -468,10 +468,11 @@ describe('pi model resolution helpers', () => {
       }
     );
 
-    expect(model.compat?.requiresThinkingInContent).toBe(true);
+    // OpenAI-compatible endpoints reject `{ type: "thinking" }` (issue #231).
+    expect(model.compat?.requiresThinkingInContent).toBeUndefined();
   });
 
-  it('sets requiresThinkingInContent for provider-prefixed DeepSeek V4 model ids', () => {
+  it('does not set requiresThinkingInContent for provider-prefixed DeepSeek V4 model ids', () => {
     const model = applyPiModelRuntimeOverrides(
       {
         id: 'deepseek/deepseek-v4-flash',
@@ -492,7 +493,7 @@ describe('pi model resolution helpers', () => {
       }
     );
 
-    expect(model.compat?.requiresThinkingInContent).toBe(true);
+    expect(model.compat?.requiresThinkingInContent).toBeUndefined();
   });
 
   it('does not set requiresThinkingInContent for non-V4 DeepSeek models on custom endpoints', () => {
