@@ -18,6 +18,7 @@ import type {
   GatewayStatus,
   GatewayConfig,
   FeishuChannelConfig,
+  SlackChannelConfig,
   ChannelType,
   RemoteSessionMapping,
   PairedUser,
@@ -25,6 +26,7 @@ import type {
   RemoteConfig,
 } from './types';
 import type { Message, ContentBlock, ServerEvent, Session } from '../../renderer/types/index';
+import { getSlackChannelConfigError } from '../../shared/slack-channel-config';
 
 // Agent executor interface - exported for use in main process
 export interface AgentExecutor {
@@ -410,6 +412,68 @@ export class RemoteManager extends EventEmitter {
     }
 
     // Restart to apply changes
+    if (this.gateway?.running) {
+      await this.restart();
+    }
+  }
+
+  /**
+   * Update Slack channel config
+   */
+  async updateSlackConfig(config: SlackChannelConfig): Promise<void> {
+    const configError = getSlackChannelConfigError(config);
+    if (configError) {
+      throw new Error(configError);
+    }
+
+    remoteConfigStore.setSlackConfig(config);
+
+    // Sync Slack DM policy to gateway auth mode so checkAuthorization() matches.
+    // Same cross-channel caveat as Feishu: gateway auth mode applies to all channels.
+    if (config.dm) {
+      const currentGateway = remoteConfigStore.getGatewayConfig();
+      const currentAuth = currentGateway.auth;
+
+      if (currentAuth.mode === 'token' || currentAuth.token) {
+        log(
+          '[RemoteManager] Skipping Slack DM policy sync: gateway uses token auth, preserving for other channels'
+        );
+      } else {
+        switch (config.dm.policy) {
+          case 'open':
+            remoteConfigStore.setGatewayConfig({
+              auth: { ...currentAuth, mode: 'open' },
+            });
+            break;
+          case 'pairing':
+            remoteConfigStore.setGatewayConfig({
+              auth: { ...currentAuth, mode: 'pairing' },
+            });
+            break;
+          case 'allowlist': {
+            const slackEntries = (config.dm.allowFrom ?? []).map((id) => `slack:${id}`);
+            const nonSlackEntries = (currentAuth.allowlist ?? []).filter(
+              (entry) => !entry.startsWith('slack:')
+            );
+            const pairedSlackEntries = remoteConfigStore
+              .getPairedUsers()
+              .filter((u) => u.channelType === 'slack')
+              .map((u) => `slack:${u.userId}`);
+            remoteConfigStore.setGatewayConfig({
+              auth: {
+                ...currentAuth,
+                mode: 'allowlist',
+                allowlist: [
+                  ...new Set([...nonSlackEntries, ...pairedSlackEntries, ...slackEntries]),
+                ],
+              },
+            });
+            break;
+          }
+        }
+      }
+    }
+
     if (this.gateway?.running) {
       await this.restart();
     }
