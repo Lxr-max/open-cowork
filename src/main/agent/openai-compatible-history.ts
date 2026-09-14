@@ -10,6 +10,13 @@
  *
  * Filter thinking blocks only when building the OpenAI-compatible request.
  * Do not mutate stored history.
+ *
+ * Top-level `reasoning_content` is intentionally kept. Legacy `deepseek-reasoner`
+ * docs rejected that field on *input* messages, but current DeepSeek V4 thinking
+ * mode (the #231 endpoint) ignores it when `tools` are absent and *requires* it
+ * on every subsequent request when `tools` are present — omitting it 400s with
+ * "reasoning_content in the thinking mode must be passed back". Open Cowork is a
+ * tool-using agent, so stripping it would regress multi-turn V4 tool calls.
  */
 
 export type ChatProtocol = 'openai-compatible' | 'anthropic-compatible';
@@ -30,6 +37,10 @@ export function isThinkingContentPart(part: unknown): boolean {
   return Boolean(
     part && typeof part === 'object' && (part as { type?: unknown }).type === 'thinking'
   );
+}
+
+function hasToolCalls(message: OpenAICompatibleChatMessage): boolean {
+  return Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
 }
 
 /**
@@ -56,20 +67,35 @@ export function stripThinkingPartsFromOpenAIContent<T>(content: T): T {
 /**
  * Strip Anthropic-style thinking parts from an OpenAI Chat Completions payload.
  * Tool calls stay on `tool_calls`; tool results stay on `role: "tool"`.
+ *
+ * Thinking-only `content` arrays become invalid `[]`. Drop the message when there
+ * are no tool calls; otherwise use an empty string (same shape convertMessages
+ * already uses for tool-call turns with no text).
  */
 export function stripThinkingBlocksFromOpenAICompatibleMessages<
   M extends OpenAICompatibleChatMessage,
 >(messages: M[]): M[] {
-  return messages.map((message) => {
-    if (!Array.isArray(message.content)) {
-      return message;
+  const result: M[] = [];
+  for (const message of messages) {
+    if (!message || typeof message !== 'object' || !Array.isArray(message.content)) {
+      result.push(message);
+      continue;
     }
     const content = stripThinkingPartsFromOpenAIContent(message.content);
     if (content.length === message.content.length) {
-      return message;
+      result.push(message);
+      continue;
     }
-    return { ...message, content };
-  });
+    if (content.length === 0) {
+      if (!hasToolCalls(message)) {
+        continue;
+      }
+      result.push({ ...message, content: '' });
+      continue;
+    }
+    result.push({ ...message, content });
+  }
+  return result;
 }
 
 /**

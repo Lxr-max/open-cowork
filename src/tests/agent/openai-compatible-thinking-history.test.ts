@@ -185,6 +185,69 @@ describe('stripThinkingBlocksFromOpenAICompatibleMessages', () => {
     expect(findOpenAICompatibleThinkingVariants(stripped)).toEqual([]);
     expect(stripped[1]?.content).toEqual([{ type: 'text', text: 'Hi there!' }]);
   });
+
+  it('omits thinking-only assistant messages that would become content: []', () => {
+    const stripped = stripThinkingBlocksFromOpenAICompatibleMessages([
+      { role: 'user', content: 'Hello' },
+      {
+        role: 'assistant',
+        content: [{ type: 'thinking', thinking: 'only CoT, no visible text' }],
+      },
+      { role: 'user', content: 'Follow up' },
+    ]);
+
+    expect(stripped).toEqual([
+      { role: 'user', content: 'Hello' },
+      { role: 'user', content: 'Follow up' },
+    ]);
+    expect(
+      stripped.some((message) => Array.isArray(message.content) && message.content.length === 0)
+    ).toBe(false);
+  });
+
+  it('keeps tool_calls and uses empty-string content instead of []', () => {
+    const stripped = stripThinkingBlocksFromOpenAICompatibleMessages([
+      {
+        role: 'assistant',
+        content: [{ type: 'thinking', thinking: 'call bash' }],
+        tool_calls: [
+          {
+            id: 'call_ls',
+            type: 'function',
+            function: { name: 'Bash', arguments: '{"command":"ls"}' },
+          },
+        ],
+      },
+    ]);
+
+    expect(stripped).toHaveLength(1);
+    expect(stripped[0]?.content).toBe('');
+    expect(stripped[0]?.tool_calls).toEqual([
+      {
+        id: 'call_ls',
+        type: 'function',
+        function: { name: 'Bash', arguments: '{"command":"ls"}' },
+      },
+    ]);
+  });
+
+  it('leaves top-level reasoning_content in place for DeepSeek V4 tool replay', () => {
+    // Current V4 thinking-mode docs: when the request includes tools, omitting
+    // reasoning_content 400s. Legacy deepseek-reasoner rejected it on input;
+    // V4 ignores it when tools are absent. Open Cowork always sends tools.
+    const stripped = stripThinkingBlocksFromOpenAICompatibleMessages([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'cot' },
+          { type: 'text', text: 'answer' },
+        ],
+        reasoning_content: 'cot',
+      },
+    ]);
+    expect(stripped[0]?.content).toEqual([{ type: 'text', text: 'answer' }]);
+    expect(stripped[0]?.reasoning_content).toBe('cot');
+  });
 });
 
 describe('OpenAI-compatible convertMessages (pi-ai openai-completions)', () => {
@@ -270,13 +333,12 @@ describe('OpenAI-compatible convertMessages (pi-ai openai-completions)', () => {
     expect(findOpenAICompatibleThinkingVariants(result)).toEqual([]);
     const assistant = result.find((message: { role: string }) => message.role === 'assistant') as {
       content?: unknown;
-      reasoning_content?: unknown;
     };
     expect(assistant?.content).toBe('Hi there!');
-    expect(assistant?.reasoning_content).toBe('Let me think about this...');
+    expect(JSON.stringify(result)).not.toMatch(/"type":"thinking"/);
   });
 
-  it('maps thinking to reasoning_content instead of content[] thinking (DeepSeek multi-turn fixture)', () => {
+  it('drops type:thinking on a DeepSeek-like multi-turn fixture (the previous 400)', () => {
     // First turn works; the second request used to 400 because history included
     // `{ type: "thinking" }` in messages[2].content.
     const result = convertMessages(
@@ -311,10 +373,41 @@ describe('OpenAI-compatible convertMessages (pi-ai openai-completions)', () => {
     expect(result[1]).toMatchObject({
       role: 'assistant',
       content: 'Hello! How can I help?',
-      reasoning_content: 'hidden CoT from turn 1',
     });
     expect(JSON.stringify(result)).not.toMatch(/"type":"thinking"/);
     expect(findOpenAICompatibleThinkingVariants(result)).toEqual([]);
+  });
+
+  it('omits thinking-only assistant turns with no tool calls', () => {
+    const result = convertMessages(
+      deepseekOpenAIModel,
+      {
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'Hello' }], timestamp: 1 },
+          {
+            role: 'assistant',
+            ...sameDeepseekMeta,
+            content: [
+              {
+                type: 'thinking',
+                thinking: 'still thinking, no answer yet',
+                thinkingSignature: 'reasoning_content',
+              },
+            ],
+          },
+          { role: 'user', content: [{ type: 'text', text: 'Follow up' }], timestamp: 2 },
+        ],
+      },
+      openaiCompat
+    );
+
+    expect(result.map((message: { role: string }) => message.role)).toEqual(['user', 'user']);
+    expect(
+      result.some(
+        (message: { content?: unknown }) =>
+          Array.isArray(message.content) && message.content.length === 0
+      )
+    ).toBe(false);
   });
 
   it('keeps requiresThinkingAsText as type:text parts, never type:thinking', () => {

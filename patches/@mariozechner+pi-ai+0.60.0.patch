@@ -10,10 +10,10 @@ index 5aeee0d..cbd865e 100644
  //# sourceMappingURL=anthropic.js.map
 \ No newline at end of file
 diff --git a/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js b/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js
-index 29ae8cf..195c30b 100644
+index 29ae8cf..da97105 100644
 --- a/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js
 +++ b/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js
-@@ -384,6 +384,25 @@ function maybeAddOpenRouterAnthropicCacheControl(model, messages) {
+@@ -384,6 +384,43 @@ function maybeAddOpenRouterAnthropicCacheControl(model, messages) {
          }
      }
  }
@@ -23,30 +23,47 @@ index 29ae8cf..195c30b 100644
 + * endpoint (`https://api.deepseek.com`) with:
 + *   unknown variant `thinking`, expected `text`
 + * Strip those parts from outbound history. Stored SDK/DB messages are unchanged.
++ *
++ * Do not delete top-level `reasoning_content`. Legacy deepseek-reasoner rejected
++ * that field on input, but DeepSeek V4 thinking mode requires it on subsequent
++ * requests that carry `tools` (Open Cowork always does). Omitting it 400s with
++ * "reasoning_content in the thinking mode must be passed back".
 + */
 +function stripThinkingBlocksFromOpenAICompatibleMessages(messages) {
-+    return messages.map((msg) => {
-+        if (!msg || !Array.isArray(msg.content)) {
-+            return msg;
++    const result = [];
++    for (const msg of messages) {
++        if (!msg || typeof msg !== "object" || !Array.isArray(msg.content)) {
++            result.push(msg);
++            continue;
 +        }
 +        const content = msg.content.filter((part) => !part || part.type !== "thinking");
 +        if (content.length === msg.content.length) {
-+            return msg;
++            result.push(msg);
++            continue;
 +        }
-+        return { ...msg, content };
-+    });
++        const hasToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
++        if (content.length === 0) {
++            // Empty content arrays 400 on OpenAI-compatible endpoints.
++            if (!hasToolCalls) {
++                continue;
++            }
++            result.push({ ...msg, content: "" });
++            continue;
++        }
++        result.push({ ...msg, content });
++    }
++    return result;
 +}
  export function convertMessages(model, context, compat) {
      const params = [];
      const normalizeToolCallId = (id) => {
-@@ -474,13 +493,23 @@ export function convertMessages(model, context, compat) {
+@@ -474,13 +511,22 @@ export function convertMessages(model, context, compat) {
              // Filter out empty thinking blocks to avoid API validation errors
              const nonEmptyThinkingBlocks = thinkingBlocks.filter((b) => b.thinking && b.thinking.trim().length > 0);
              if (nonEmptyThinkingBlocks.length > 0) {
 +                // Never emit `{ type: "thinking" }` into OpenAI-compatible content[].
-+                // DeepSeek V4 (and similar thinking-capable models) accept thinking as
-+                // a top-level `reasoning_content` field, or as plain text when
-+                // requiresThinkingAsText is set. Anthropic protocol is a separate path.
++                // DeepSeek V4 replay uses top-level `reasoning_content` (required when
++                // the request includes tools). requiresThinkingAsText keeps type:text.
                  if (compat.requiresThinkingAsText) {
                      // Convert thinking blocks to plain text (no tags to avoid model mimicking them)
                      const thinkingText = nonEmptyThinkingBlocks.map((b) => b.thinking).join("\n\n");
@@ -64,7 +81,7 @@ index 29ae8cf..195c30b 100644
                      else {
                          assistantMsg.content = [{ type: "text", text: thinkingText }];
                      }
-@@ -594,7 +623,7 @@ export function convertMessages(model, context, compat) {
+@@ -594,7 +640,7 @@ export function convertMessages(model, context, compat) {
          }
          lastRole = msg.role;
      }
