@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => {
   const gatewayOn = vi.fn();
   const setSlackConfig = vi.fn();
   const setGatewayConfig = vi.fn();
+  const clearSlackConfig = vi.fn();
   const SlackChannel = vi.fn();
 
   class MockGateway {
@@ -59,12 +60,14 @@ const mocks = vi.hoisted(() => {
     gatewayOn,
     setSlackConfig,
     setGatewayConfig,
+    clearSlackConfig,
     SlackChannel,
     MockGateway,
     slackConfig,
     storeState,
     getAll: vi.fn(() => storeState),
     getGatewayConfig: vi.fn(() => storeState.gateway),
+    getSlackConfig: vi.fn(() => storeState.channels.slack),
     getPairedUsers: vi.fn(() => []),
   };
 });
@@ -85,6 +88,8 @@ vi.mock('../../main/remote/remote-config-store', () => ({
     getGatewayConfig: mocks.getGatewayConfig,
     setGatewayConfig: mocks.setGatewayConfig,
     setSlackConfig: mocks.setSlackConfig,
+    getSlackConfig: mocks.getSlackConfig,
+    clearSlackConfig: mocks.clearSlackConfig,
     getPairedUsers: mocks.getPairedUsers,
   },
 }));
@@ -141,14 +146,65 @@ describe('RemoteManager Slack config', () => {
   it('persists complete Socket Mode config to channels.slack', async () => {
     const { RemoteManager } = await import('../../main/remote/remote-manager');
     const manager = new RemoteManager();
-    const config = socketConfig({ dm: { policy: 'open' } });
+    const config = socketConfig({ dm: { policy: 'pairing' } });
 
     await manager.updateSlackConfig(config);
 
     expect(mocks.setSlackConfig).toHaveBeenCalledWith(config);
-    expect(mocks.setGatewayConfig).toHaveBeenCalledWith({
-      auth: { mode: 'open', allowlist: [] },
+  });
+
+  it('does not downgrade a Feishu/gateway allowlist when Slack policy is pairing or open', async () => {
+    const { RemoteManager } = await import('../../main/remote/remote-manager');
+    const manager = new RemoteManager();
+    mocks.storeState.gateway.auth = {
+      mode: 'allowlist',
+      allowlist: ['feishu:ou_existing'],
+    };
+
+    await manager.updateSlackConfig(socketConfig({ dm: { policy: 'open' } }));
+    await manager.updateSlackConfig(socketConfig({ dm: { policy: 'pairing' } }));
+
+    expect(mocks.setGatewayConfig).not.toHaveBeenCalled();
+  });
+
+  it('preserves existing dm.allowFrom and groups when settings save omits them', async () => {
+    const { RemoteManager } = await import('../../main/remote/remote-manager');
+    const manager = new RemoteManager();
+    mocks.storeState.channels.slack = {
+      type: 'slack',
+      botToken: 'xoxb-old',
+      appToken: 'xapp-old',
+      useSocketMode: true,
+      dm: { policy: 'allowlist', allowFrom: ['U123'] },
+      groups: { C1: { requireMention: true } },
+    };
+
+    await manager.updateSlackConfig(
+      socketConfig({
+        botToken: 'xoxb-new',
+        appToken: 'xapp-new',
+        dm: { policy: 'pairing' },
+      })
+    );
+
+    expect(mocks.setSlackConfig).toHaveBeenCalledWith({
+      type: 'slack',
+      botToken: 'xoxb-new',
+      appToken: 'xapp-new',
+      useSocketMode: true,
+      dm: { policy: 'pairing', allowFrom: ['U123'] },
+      groups: { C1: { requireMention: true } },
     });
+  });
+
+  it('clears Slack config when updateSlackConfig is called with null', async () => {
+    const { RemoteManager } = await import('../../main/remote/remote-manager');
+    const manager = new RemoteManager();
+
+    await manager.updateSlackConfig(null);
+
+    expect(mocks.clearSlackConfig).toHaveBeenCalledTimes(1);
+    expect(mocks.setSlackConfig).not.toHaveBeenCalled();
   });
 
   it('rejects incomplete Socket Mode configs without persisting', async () => {

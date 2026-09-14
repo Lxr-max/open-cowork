@@ -185,6 +185,14 @@ class RemoteConfigStore {
   }
 
   /**
+   * Remove slack channel config
+   */
+  clearSlackConfig(): void {
+    this.store.delete('channels.slack');
+    log('[RemoteConfig] Slack config cleared');
+  }
+
+  /**
    * Get wechat channel config
    */
   getWechatConfig(): WechatChannelConfig | undefined {

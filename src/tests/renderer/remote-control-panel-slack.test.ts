@@ -36,7 +36,10 @@ describe('Remote Control Slack settings wiring', () => {
     expect(panelSource).toContain('<SlackConfigStep');
     expect(panelSource).toContain('buildSlackSocketChannelConfig');
     expect(panelSource).toContain('updateSlackConfig');
-    expect(panelSource).toContain("key: 'remote.slackCredentialsRequired'");
+    expect(panelSource).toContain('isRemotePairingPolicy');
+    expect(panelSource).toContain('updateSlackConfig(null)');
+    expect(panelSource).toContain('slackWasConfigured');
+    expect(panelSource).not.toContain("slackDmPolicy as 'open' | 'pairing' | 'allowlist'");
   });
 
   it('resets isSaving in a finally block after save failure', () => {
@@ -57,6 +60,7 @@ describe('Remote Control Slack settings wiring', () => {
     expect(mainSource).toContain("ipcMain.handle('remote.updateSlackConfig'");
     expect(mainSource).toContain('remoteManager.updateSlackConfig');
     expect(storeSource).toContain('setSlackConfig');
+    expect(storeSource).toContain('clearSlackConfig');
     expect(storeSource).toContain("'channels.slack'");
   });
 

@@ -402,7 +402,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('remote.updateFeishuConfig', config),
     updateSlackConfig: (
-      config: SlackChannelConfig
+      config: SlackChannelConfig | null
     ): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('remote.updateSlackConfig', config),
     getPairedUsers: (): Promise<PairedUser[]> => ipcRenderer.invoke('remote.getPairedUsers'),
@@ -679,7 +679,7 @@ declare global {
           config: FeishuChannelConfig
         ) => Promise<{ success: boolean; error?: string }>;
         updateSlackConfig: (
-          config: SlackChannelConfig
+          config: SlackChannelConfig | null
         ) => Promise<{ success: boolean; error?: string }>;
         getPairedUsers: () => Promise<PairedUser[]>;
         getPendingPairings: () => Promise<PairingRequest[]>;

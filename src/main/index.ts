@@ -2859,7 +2859,7 @@ ipcMain.handle('remote.updateFeishuConfig', async (_event, config: FeishuChannel
   }
 });
 
-ipcMain.handle('remote.updateSlackConfig', async (_event, config: SlackChannelConfig) => {
+ipcMain.handle('remote.updateSlackConfig', async (_event, config: SlackChannelConfig | null) => {
   try {
     await remoteManager.updateSlackConfig(config);
     return { success: true };

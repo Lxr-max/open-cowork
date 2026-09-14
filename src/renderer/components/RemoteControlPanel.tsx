@@ -28,6 +28,7 @@ import type {
 import {
   buildSlackSocketChannelConfig,
   getSlackChannelConfigError,
+  isRemotePairingPolicy,
   isSlackSocketConfigComplete,
 } from '../../shared/slack-channel-config';
 
@@ -39,7 +40,7 @@ export function RemoteControlPanel({ isActive }: { isActive: boolean }) {
   // Remote state
   const [isLoading, setIsLoading] = useState(true);
   const [status, setStatus] = useState<GatewayStatus | null>(null);
-  const [, setConfig] = useState<RemoteConfig | null>(null);
+  const [config, setConfig] = useState<RemoteConfig | null>(null);
   const [pairedUsers, setPairedUsers] = useState<PairedUser[]>([]);
   const [pendingPairings, setPendingPairings] = useState<PairingRequest[]>([]);
   const [isTogglingGateway, setIsTogglingGateway] = useState(false);
@@ -163,6 +164,7 @@ export function RemoteControlPanel({ isActive }: { isActive: boolean }) {
     if (!isElectron) return;
 
     const hasSlackInput = Boolean(slackBotToken.trim() || slackAppToken.trim());
+    const slackWasConfigured = Boolean(config?.channels?.slack?.botToken);
     const slackConfig = isSlackSocketConfigComplete({
       botToken: slackBotToken,
       appToken: slackAppToken,
@@ -170,7 +172,7 @@ export function RemoteControlPanel({ isActive }: { isActive: boolean }) {
       ? buildSlackSocketChannelConfig({
           botToken: slackBotToken,
           appToken: slackAppToken,
-          dmPolicy: slackDmPolicy as 'open' | 'pairing' | 'allowlist',
+          dmPolicy: slackDmPolicy,
         })
       : null;
 
@@ -214,6 +216,12 @@ export function RemoteControlPanel({ isActive }: { isActive: boolean }) {
 
       if (slackConfig) {
         const slackResult = await window.electronAPI.remote.updateSlackConfig(slackConfig);
+        if (!slackResult.success) {
+          setError(slackResult.error ? { text: slackResult.error } : { key: 'remote.saveFailed' });
+          return;
+        }
+      } else if (!hasSlackInput && slackWasConfigured) {
+        const slackResult = await window.electronAPI.remote.updateSlackConfig(null);
         if (!slackResult.success) {
           setError(slackResult.error ? { text: slackResult.error } : { key: 'remote.saveFailed' });
           return;
@@ -285,7 +293,11 @@ export function RemoteControlPanel({ isActive }: { isActive: boolean }) {
     appToken: slackAppToken,
   });
   const canStartGateway = isFeishuConfigured || isSlackConfigured;
-  const isPairingPolicy = feishuDmPolicy === 'pairing' || slackDmPolicy === 'pairing';
+  const isPairingPolicy = isRemotePairingPolicy({
+    feishuDmPolicy,
+    slackDmPolicy,
+    isSlackConfigured,
+  });
   const isConnectionConfigured =
     useLongConnection || (tunnelEnabled && !!ngrokAuthToken) || !!tunnelStatus?.connected;
   const permissionSeparator = i18n.language.startsWith('zh') ? '、' : ', ';

@@ -89,7 +89,7 @@ export interface FeishuChannelConfig {
   defaultGroupSettings?: { requireMention: boolean };
 }
 
-/** Slack channel configuration (mirrors SlackChannelConfig in remote/types.ts). */
+/** Slack channel configuration (canonical; re-exported from main remote types). */
 export interface SlackChannelConfig {
   type: 'slack';
   botToken: string;
@@ -101,6 +101,7 @@ export interface SlackChannelConfig {
     allowFrom?: string[];
   };
   groups?: Record<string, { requireMention: boolean; allowFrom?: string[] }>;
+  channels?: Record<string, { requireMention: boolean; allowFrom?: string[] }>;
 }
 
 /** Gateway authentication config. */
