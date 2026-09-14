@@ -24,6 +24,7 @@ function keyEvent(overrides: Partial<ModelCycleKeyEvent> = {}): ModelCycleKeyEve
     defaultPrevented: false,
     preventDefault: vi.fn(),
     stopPropagation: vi.fn(),
+    stopImmediatePropagation: vi.fn(),
     ...overrides,
   };
 }
@@ -144,6 +145,24 @@ describe('listModelCycleTargets / pickNextModelCycleTarget', () => {
     });
   });
 
+  it('does not borrow the current config model when a target set has no model', () => {
+    const emptySet: ApiConfigSet = {
+      ...makeSet('empty', 'Empty', ''),
+      profiles: { openai: { apiKey: 'sk-test', model: '' } },
+    };
+    const targets = listModelCycleTargets(
+      makeConfig({
+        configSets: [emptySet, makeSet('vision', 'Vision', 'gpt-5.4')],
+        activeConfigSetId: 'empty',
+        model: 'gpt-5.4',
+      })
+    );
+    expect(targets).toEqual([
+      { kind: 'set', id: 'empty', name: 'Empty', model: '' },
+      { kind: 'set', id: 'vision', name: 'Vision', model: 'gpt-5.4' },
+    ]);
+  });
+
   it('falls back to provider preset models when only one config set exists', () => {
     const targets = listModelCycleTargets(makeConfig({ model: 'gpt-5.4' }));
     expect(targets[0]).toEqual({ kind: 'model', model: 'gpt-5.4' });
@@ -224,6 +243,7 @@ describe('createModelCycleKeydownHandler', () => {
     handler(event);
 
     expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(event.stopImmediatePropagation).toHaveBeenCalledOnce();
     await vi.waitFor(() => {
       expect(onCycled).toHaveBeenCalledWith({
         kind: 'set',
@@ -268,6 +288,7 @@ describe('createModelCycleKeydownHandler', () => {
     handler(event);
 
     expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(event.stopImmediatePropagation).toHaveBeenCalledOnce();
     await vi.waitFor(() => {
       expect(onCycled).toHaveBeenCalledWith({ kind: 'model', model: 'gpt-5.4-pro' });
     });
@@ -279,13 +300,43 @@ describe('createModelCycleKeydownHandler', () => {
     const config = makeConfig({
       configSets: [makeSet('default', 'A', 'a'), makeSet('other', 'B', 'b')],
     });
+    const settingsEvent = keyEvent({ ctrlKey: true });
     const settings = setup(config, { settingsOpen: true });
-    settings.handler(keyEvent({ ctrlKey: true }));
+    settings.handler(settingsEvent);
     expect(settings.switchSet).not.toHaveBeenCalled();
+    expect(settingsEvent.preventDefault).not.toHaveBeenCalled();
 
+    const modalEvent = keyEvent({ ctrlKey: true });
     const modal = setup(config, { configModalOpen: true });
-    modal.handler(keyEvent({ ctrlKey: true }));
+    modal.handler(modalEvent);
     expect(modal.switchSet).not.toHaveBeenCalled();
+    expect(modalEvent.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('does not consume Ctrl+P when a cycle is already in flight', () => {
+    const config = makeConfig({
+      configSets: [makeSet('default', 'A', 'a'), makeSet('other', 'B', 'b')],
+    });
+    const switchSet = vi.fn(async () => ({ success: true, config }));
+    const saveModel = vi.fn(async () => ({ success: true, config }));
+    const event = keyEvent({ ctrlKey: true });
+    const handler = createModelCycleKeydownHandler({
+      getContext: () => ({
+        config,
+        settingsOpen: false,
+        configModalOpen: false,
+      }),
+      cycleInFlight: { current: true },
+      switchSet,
+      saveModel,
+      onCycled: vi.fn(),
+    });
+
+    handler(event);
+
+    expect(switchSet).not.toHaveBeenCalled();
+    expect(saveModel).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
   });
 
   it('does not steal unrelated shortcuts or unmodified typing', () => {

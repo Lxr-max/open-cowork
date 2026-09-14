@@ -19,6 +19,7 @@ export interface ModelCycleKeyEvent {
   defaultPrevented?: boolean;
   preventDefault: () => void;
   stopPropagation?: () => void;
+  stopImmediatePropagation?: () => void;
 }
 
 export interface ModelCycleContext {
@@ -100,7 +101,7 @@ export function listModelCycleTargets(
       kind: 'set' as const,
       id: set.id,
       name: set.name,
-      model: getConfigSetModel(set) || config.model?.trim() || '',
+      model: getConfigSetModel(set),
     }));
   }
 
@@ -153,6 +154,8 @@ export async function applyModelCycleTarget(
     await actions.switchSet(target.id);
     return;
   }
+  // config.save({ model }) writes the active config set's profile model.
+  // SessionManager.reloadConfig / the next query then hot-swaps via setModel.
   await actions.saveModel(target.model);
 }
 
@@ -164,9 +167,6 @@ export function createModelCycleKeydownHandler(
     if (!direction) {
       return;
     }
-
-    event.preventDefault();
-    event.stopPropagation?.();
 
     if (options.cycleInFlight.current) {
       return;
@@ -188,6 +188,12 @@ export function createModelCycleKeydownHandler(
     if (!next) {
       return;
     }
+
+    // Consume the keystroke only when a cycle will actually run so Settings,
+    // the config modal, and empty target lists do not swallow Ctrl/Cmd+P.
+    event.preventDefault();
+    event.stopImmediatePropagation?.();
+    event.stopPropagation?.();
 
     options.cycleInFlight.current = true;
     void applyModelCycleTarget(next, options)
