@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ApiConfigSet, AppConfig, ProviderProfileKey } from '../../renderer/types';
+import en from '../../renderer/i18n/locales/en.json';
+import zh from '../../renderer/i18n/locales/zh.json';
 import {
   applyModelCycleTarget,
   createModelCycleKeydownHandler,
@@ -339,6 +341,51 @@ describe('createModelCycleKeydownHandler', () => {
     expect(event.preventDefault).not.toHaveBeenCalled();
   });
 
+  it('does not consume Ctrl+P when config is null', () => {
+    const switchSet = vi.fn(async () => undefined);
+    const saveModel = vi.fn(async () => undefined);
+    const event = keyEvent({ ctrlKey: true });
+    const handler = createModelCycleKeydownHandler({
+      getContext: () => ({
+        config: null,
+        settingsOpen: false,
+        configModalOpen: false,
+      }),
+      cycleInFlight: { current: false },
+      switchSet,
+      saveModel,
+      onCycled: vi.fn(),
+    });
+
+    handler(event);
+
+    expect(switchSet).not.toHaveBeenCalled();
+    expect(saveModel).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(event.stopImmediatePropagation).not.toHaveBeenCalled();
+  });
+
+  it('does not call preventDefault when there is no cycle target', () => {
+    const lonely = makeSet('default', 'Default', 'only-one');
+    const config = makeConfig({
+      provider: 'not-a-provider' as AppConfig['provider'],
+      model: 'only-one',
+      activeProfileKey: 'openai',
+      profiles: lonely.profiles,
+      configSets: [lonely],
+    });
+    const { handler, switchSet, saveModel } = setup(config);
+    const event = keyEvent({ ctrlKey: true });
+
+    expect(listModelCycleTargets(config)).toEqual([]);
+    handler(event);
+
+    expect(switchSet).not.toHaveBeenCalled();
+    expect(saveModel).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(event.stopImmediatePropagation).not.toHaveBeenCalled();
+  });
+
   it('does not steal unrelated shortcuts or unmodified typing', () => {
     const { handler, switchSet, saveModel } = setup(makeConfig());
     handler(keyEvent({ key: 't', code: 'KeyT', ctrlKey: true }));
@@ -365,5 +412,16 @@ describe('applyModelCycleTarget', () => {
 
     await applyModelCycleTarget({ kind: 'model', model: 'o3' }, { switchSet, saveModel });
     expect(saveModel).toHaveBeenCalledWith('o3');
+  });
+});
+
+describe('model-cycle i18n', () => {
+  it('keeps cycle strings under the chat namespace in en and zh', () => {
+    expect(en.chat.modelCycled).toContain('{{model}}');
+    expect(en.chat.modelCycledSet).toContain('{{name}}');
+    expect(en.chat.modelCycledSet).toContain('{{model}}');
+    expect(zh.chat.modelCycled).toContain('{{model}}');
+    expect(zh.chat.modelCycledSet).toContain('{{name}}');
+    expect(zh.chat.modelCycledSet).toContain('{{model}}');
   });
 });
