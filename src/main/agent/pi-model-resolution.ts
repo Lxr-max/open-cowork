@@ -160,6 +160,53 @@ export function buildSyntheticPiModel(
   } as Model<Api>;
 }
 
+export interface RuntimeSyntheticPiModelConfig {
+  model?: string;
+  provider?: string;
+  customProtocol?: string;
+  baseUrl?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+}
+
+/**
+ * Production synthetic-model path used by the agent runner.
+ * Reads contextWindow/maxTokens from the runtime config object so callers
+ * cannot accidentally drop projected flat AppConfig overrides.
+ */
+export function buildSyntheticPiModelFromRuntimeConfig(
+  runtimeConfig: RuntimeSyntheticPiModelConfig,
+  input: {
+    resolvedModelString: string;
+    routeProtocol: string;
+    effectiveBaseUrl?: string;
+  }
+): Model<Api> {
+  const synthetic = resolveSyntheticPiModelFallback({
+    rawModel: runtimeConfig.model,
+    resolvedModelString: input.resolvedModelString,
+    rawProvider: runtimeConfig.provider,
+    routeProtocol: input.routeProtocol,
+    baseUrl: input.effectiveBaseUrl,
+  });
+  const piModel = buildSyntheticPiModel(
+    synthetic.modelId,
+    synthetic.provider,
+    input.routeProtocol,
+    input.effectiveBaseUrl,
+    undefined,
+    undefined,
+    runtimeConfig.contextWindow,
+    runtimeConfig.maxTokens
+  );
+  return applyPiModelRuntimeOverrides(piModel, {
+    configProvider: input.routeProtocol,
+    customBaseUrl: input.effectiveBaseUrl,
+    rawProvider: runtimeConfig.provider,
+    customProtocol: runtimeConfig.customProtocol,
+  });
+}
+
 export function resolveSyntheticPiModelFallback(
   input: SyntheticPiModelFallbackInput
 ): SyntheticPiModelFallback {
