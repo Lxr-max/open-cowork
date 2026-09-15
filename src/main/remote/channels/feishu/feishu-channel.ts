@@ -12,11 +12,21 @@ import type {
   FeishuChannelConfig,
   RemoteMessage,
   RemoteResponse,
-  RemoteContent,
   RemoteResponseContent,
 } from '../../types';
+import { AESCipher } from '@larksuiteoapi/node-sdk';
 import { FeishuAPI } from './feishu-api';
 import { FeishuWSClient } from './feishu-ws-client';
+import { parseFeishuMessageContent, resolveFeishuRemoteContent } from './feishu-message-content';
+
+function normalizeFeishuMentions(mentions: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(mentions)) {
+    return [];
+  }
+  return mentions.filter(
+    (item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object'
+  );
+}
 
 export class FeishuChannel extends ChannelBase {
   readonly type = 'feishu' as const;
@@ -29,10 +39,10 @@ export class FeishuChannel extends ChannelBase {
   private botOpenId?: string;
   private botName?: string;
 
-  constructor(config: FeishuChannelConfig) {
+  constructor(config: FeishuChannelConfig, api?: FeishuAPI) {
     super();
     this.config = config;
-    this.api = new FeishuAPI(config.appId, config.appSecret);
+    this.api = api ?? new FeishuAPI(config.appId, config.appSecret);
   }
 
   /**
@@ -145,15 +155,15 @@ export class FeishuChannel extends ChannelBase {
     body: string,
     signature: string
   ): boolean {
-    const verificationToken = this.config?.verificationToken;
-    if (!verificationToken) return false; // Reject — verificationToken is required for webhook mode
+    // Official Feishu/Lark event callback signature:
+    // SHA256(timestamp + nonce + encryptKey + rawBody)
+    // See larksuite/node-sdk dispatcher/request-handle.ts checkIsEventValidated.
+    const encryptKey = this.config?.encryptKey;
+    if (!encryptKey) return false;
 
     try {
-      const content = timestamp + nonce + verificationToken + body;
-      const computedSignature = crypto
-        .createHmac('sha256', verificationToken)
-        .update(content)
-        .digest('hex');
+      const content = timestamp + nonce + encryptKey + body;
+      const computedSignature = crypto.createHash('sha256').update(content).digest('hex');
       const sigBuf = Buffer.from(signature, 'hex');
       const computedBuf = Buffer.from(computedSignature, 'hex');
       if (sigBuf.length !== computedBuf.length) return false;
@@ -186,57 +196,112 @@ export class FeishuChannel extends ChannelBase {
     }
 
     try {
-      const data = JSON.parse(body);
-      log('[Feishu] Webhook data:', JSON.stringify(data, null, 2));
-
-      // Handle URL verification challenge
-      if (data.type === 'url_verification') {
-        log('[Feishu] URL verification challenge');
-        return {
-          status: 200,
-          data: { challenge: data.challenge },
-        };
+      const envelope = JSON.parse(body) as unknown;
+      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+        return { status: 400, data: { error: 'Invalid JSON' } };
       }
 
-      // Handle v2 schema (飞书新版事件格式)
-      if (data.schema === '2.0') {
-        log('[Feishu] Processing v2 schema event');
-        const eventType = data.header?.event_type;
-        log('[Feishu] Event type:', eventType);
-
-        if (eventType === 'im.message.receive_v1') {
-          this.handleMessageEvent(data.event);
-        }
-
-        return { status: 200, data: { code: 0 } };
+      const unwrapped = this.unwrapWebhookPayload(envelope as Record<string, unknown>);
+      if (!unwrapped.ok) {
+        return { status: unwrapped.status, data: { error: unwrapped.error } };
       }
 
-      // Handle v1 schema (飞书旧版事件格式)
-      if (data.event) {
-        log('[Feishu] Processing v1 schema event');
-        const eventType = data.header?.event_type || data.event?.type;
-        log('[Feishu] Event type:', eventType);
-
-        if (eventType === 'im.message.receive_v1' || eventType === 'message') {
-          this.handleMessageEvent(data.event);
-        }
-
-        return { status: 200, data: { code: 0 } };
-      }
-
-      // Verify request if encryption is enabled
-      if (this.config.encryptKey && data.encrypt) {
-        log('[Feishu] Encrypted message received, decryption not yet implemented');
-        // TODO: Implement message decryption
-        return { status: 501, data: { code: 1, msg: 'Encrypted webhook not yet supported' } };
-      }
-
-      log('[Feishu] Unknown webhook format, returning OK');
-      return { status: 200, data: { code: 0 } };
+      return this.dispatchWebhookPayload(unwrapped.payload);
     } catch (error) {
-      logError('[Feishu] Webhook handling error:', error);
+      if (error instanceof SyntaxError) {
+        return { status: 400, data: { error: 'Invalid JSON' } };
+      }
+      logError('[Feishu] Webhook handling error');
       return { status: 500, data: { error: 'Internal error' } };
     }
+  }
+
+  /**
+   * Decrypt `{ encrypt }` envelopes with AESCipher (AES-256-CBC, key = SHA256(encryptKey)).
+   * Signature verification already used the raw outer body; this runs next so encrypted
+   * URL challenges and events share the plaintext handlers.
+   */
+  private unwrapWebhookPayload(
+    envelope: Record<string, unknown>
+  ): { ok: true; payload: Record<string, unknown> } | { ok: false; status: number; error: string } {
+    if (envelope.encrypt === undefined) {
+      return { ok: true, payload: envelope };
+    }
+    if (typeof envelope.encrypt !== 'string' || envelope.encrypt.length === 0) {
+      logWarn('[Feishu] Encrypted webhook envelope is invalid');
+      return { ok: false, status: 400, error: 'Invalid encrypted payload' };
+    }
+
+    const encryptKey = this.config.encryptKey;
+    if (!encryptKey) {
+      logWarn('[Feishu] Encrypted webhook received without encryptKey configured');
+      return { ok: false, status: 400, error: 'Invalid encrypted payload' };
+    }
+
+    try {
+      const plaintext = new AESCipher(encryptKey).decrypt(envelope.encrypt);
+      const payload = JSON.parse(plaintext) as unknown;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        logWarn('[Feishu] Encrypted webhook plaintext is not a JSON object');
+        return { ok: false, status: 400, error: 'Invalid encrypted payload' };
+      }
+      return { ok: true, payload: payload as Record<string, unknown> };
+    } catch {
+      logWarn('[Feishu] Encrypted webhook decryption failed');
+      return { ok: false, status: 400, error: 'Invalid encrypted payload' };
+    }
+  }
+
+  private dispatchWebhookPayload(data: Record<string, unknown>): {
+    status: number;
+    data: Record<string, unknown>;
+  } {
+    // Handle URL verification challenge. Signature uses encryptKey; the
+    // body token must match Verification Token when one is configured.
+    if (data.type === 'url_verification') {
+      const expectedToken = this.config.verificationToken;
+      if (expectedToken && data.token !== expectedToken) {
+        logWarn('[Feishu] URL verification token mismatch');
+        return { status: 403, data: { error: 'Invalid verification token' } };
+      }
+      log('[Feishu] URL verification challenge');
+      return {
+        status: 200,
+        data: { challenge: data.challenge },
+      };
+    }
+
+    const header = data.header as { event_type?: string } | undefined;
+    const event = data.event as Record<string, unknown> | undefined;
+
+    // Handle v2 schema (飞书新版事件格式)
+    if (data.schema === '2.0') {
+      log('[Feishu] Processing v2 schema event');
+      const eventType = header?.event_type;
+      log('[Feishu] Event type:', eventType);
+
+      if (eventType === 'im.message.receive_v1' && event) {
+        this.handleMessageEvent(event);
+      }
+
+      return { status: 200, data: { code: 0 } };
+    }
+
+    // Handle v1 schema (飞书旧版事件格式)
+    if (event) {
+      log('[Feishu] Processing v1 schema event');
+      const eventType = header?.event_type || (event.type as string | undefined);
+      log('[Feishu] Event type:', eventType);
+
+      if ((eventType === 'im.message.receive_v1' || eventType === 'message') && event) {
+        this.handleMessageEvent(event);
+      }
+
+      return { status: 200, data: { code: 0 } };
+    }
+
+    log('[Feishu] Unknown webhook format, returning OK');
+    return { status: 200, data: { code: 0 } };
   }
 
   /**
@@ -255,57 +320,7 @@ export class FeishuChannel extends ChannelBase {
     // Handle incoming messages
     log('[Feishu] Registering message listener on wsClient');
     this.wsClient.on('message', (data: Record<string, unknown>) => {
-      try {
-        log('[Feishu] Received message via WebSocket:', data);
-
-        // Skip bot's own messages
-        if (data.senderType === 'bot') {
-          return;
-        }
-
-        // Build remote message
-        // Use chatId as channelId - Feishu API needs chat_id to send messages
-        const rawText = String(data.text || '');
-        // Strip only the bot's own @mention placeholder from the text
-        const cleanedText = this.stripBotMentionFromText(rawText, {
-          mentions: Array.isArray(data.mentions) ? data.mentions : [],
-        });
-        const remoteMessage: RemoteMessage = {
-          id: String(data.messageId || ''),
-          channelType: 'feishu',
-          channelId: String(data.chatId || ''), // Use actual chat_id for sending messages
-          sender: {
-            id: String(data.senderId || ''),
-            name: '', // Will be filled if needed
-            isBot: false,
-          },
-          content: {
-            type: 'text',
-            text: cleanedText,
-          },
-          timestamp: parseInt(String(data.createTime || '0')) || Date.now(),
-          isGroup: data.chatType === 'group',
-          isMentioned:
-            (Array.isArray(data.mentions) &&
-              data.mentions.some((m: Record<string, unknown>) => {
-                const mid = m.id as Record<string, unknown> | undefined;
-                return mid?.open_id === this.botOpenId;
-              })) ||
-            false,
-          raw: {
-            chatId: data.chatId,
-            chatType: data.chatType,
-            messageType: data.messageType,
-            senderId: data.senderId,
-            content: data.content,
-          },
-        };
-
-        // Emit message to handler (same as webhook mode)
-        this.emitMessage(remoteMessage);
-      } catch (error) {
-        logError('[Feishu] Error processing WebSocket message:', error);
-      }
+      void this.handleWebSocketMessage(data);
     });
 
     // Handle connection events
@@ -328,56 +343,156 @@ export class FeishuChannel extends ChannelBase {
   }
 
   /**
-   * Handle incoming message event
+   * Handle incoming webhook message event
    */
   private handleMessageEvent(event: Record<string, unknown>): void {
-    try {
-      const message = event.message as Record<string, unknown>;
-      const sender = event.sender as Record<string, unknown>;
+    void this.handleMessageEventAsync(event);
+  }
 
-      // Skip bot's own messages
+  private async handleMessageEventAsync(event: Record<string, unknown>): Promise<void> {
+    try {
+      const message = event.message as Record<string, unknown> | undefined;
+      const sender = event.sender as Record<string, unknown> | undefined;
+      if (!message || !sender) {
+        logWarn('[Feishu] Unable to parse message event');
+        return;
+      }
+
       const senderId = sender.sender_id as Record<string, unknown> | undefined;
       if (senderId?.open_id === this.botOpenId) {
         return;
       }
 
-      // Parse message content
-      const content = this.parseMessageContent(message);
-      if (!content) {
-        logWarn('[Feishu] Unable to parse message content');
-        return;
-      }
-
-      // Strip only the bot's own @mention from text content (not all @mentions)
-      if (content.type === 'text' && content.text) {
-        content.text = this.stripBotMentionFromText(content.text, message);
-      }
-
-      // Check if mentioned
-      const isMentioned = this.checkMentioned(message);
-
-      // Build remote message
-      const remoteMessage: RemoteMessage = {
+      await this.emitIncomingFeishuMessage({
         id: String(message.message_id || ''),
-        channelType: 'feishu',
         channelId: String(message.chat_id || ''),
-        sender: {
-          id: String(senderId?.open_id || senderId?.user_id || 'unknown'),
-          name: senderId?.name as string | undefined,
-          isBot: sender.sender_type === 'bot',
-        },
-        content,
+        senderId: String(senderId?.open_id || senderId?.user_id || 'unknown'),
+        senderName: senderId?.name as string | undefined,
+        isBot: sender.sender_type === 'bot',
         timestamp: parseInt(String(message.create_time || '0')) || Date.now(),
         isGroup: message.chat_type === 'group',
-        isMentioned,
+        mentions: message.mentions,
+        parseSource: message,
         raw: event,
-      };
-
-      // Emit message
-      this.emitMessage(remoteMessage);
+      });
     } catch (error) {
       logError('[Feishu] Error handling message event:', error);
     }
+  }
+
+  /**
+   * Handle inbound WebSocket payloads with the same content contract as webhooks.
+   */
+  private async handleWebSocketMessage(data: Record<string, unknown>): Promise<void> {
+    try {
+      log('[Feishu] Received message via WebSocket:', data);
+
+      if (data.senderType === 'bot') {
+        return;
+      }
+
+      await this.emitIncomingFeishuMessage({
+        id: String(data.messageId || ''),
+        channelId: String(data.chatId || ''),
+        senderId: String(data.senderId || ''),
+        senderName: '',
+        isBot: false,
+        timestamp: parseInt(String(data.createTime || '0')) || Date.now(),
+        isGroup: data.chatType === 'group',
+        mentions: data.mentions,
+        parseSource: {
+          message_type: data.messageType,
+          content: data.content,
+          mentions: data.mentions,
+        },
+        raw: {
+          chatId: data.chatId,
+          chatType: data.chatType,
+          messageType: data.messageType,
+          senderId: data.senderId,
+          content: data.content,
+        },
+      });
+    } catch (error) {
+      logError('[Feishu] Error processing WebSocket message:', error);
+    }
+  }
+
+  private async emitIncomingFeishuMessage(params: {
+    id: string;
+    channelId: string;
+    senderId: string;
+    senderName?: string;
+    isBot: boolean;
+    timestamp: number;
+    isGroup: boolean;
+    mentions: unknown;
+    parseSource: Record<string, unknown>;
+    raw: unknown;
+  }): Promise<void> {
+    const parsed = parseFeishuMessageContent(params.parseSource);
+    if (!parsed) {
+      logWarn('[Feishu] Unable to parse message content');
+      return;
+    }
+
+    const mentions = normalizeFeishuMentions(params.mentions);
+    const isMentioned = this.checkMentioned({ mentions });
+    const shouldProcess = this.shouldProcessMessage({
+      isGroup: params.isGroup,
+      isMentioned,
+      channelId: params.channelId,
+    });
+
+    if (parsed.type === 'text' && parsed.text) {
+      parsed.text = this.stripBotMentionFromText(parsed.text, { mentions });
+    }
+
+    // Download imageKey only after the mention/eligibility gate. Unmentioned
+    // group images are still emitted (cheap) so Gateway auth/pairing can run,
+    // but we skip Feishu image downloads that would be discarded.
+    const content = shouldProcess
+      ? await resolveFeishuRemoteContent(parsed, (imageKey) => this.api.downloadImage(imageKey))
+      : parsed;
+
+    const remoteMessage: RemoteMessage = {
+      id: params.id,
+      channelType: 'feishu',
+      channelId: params.channelId,
+      sender: {
+        id: params.senderId,
+        name: params.senderName,
+        isBot: params.isBot,
+      },
+      content,
+      timestamp: params.timestamp,
+      isGroup: params.isGroup,
+      isMentioned,
+      raw: params.raw,
+    };
+
+    this.emitMessage(remoteMessage);
+  }
+
+  /**
+   * Group messages require @mention unless this chat's settings say otherwise.
+   * DMs are always eligible. Matches Gateway's default "require mention in groups".
+   */
+  private shouldProcessMessage(params: {
+    isGroup: boolean;
+    isMentioned: boolean;
+    channelId: string;
+  }): boolean {
+    if (!params.isGroup) {
+      return true;
+    }
+    if (params.isMentioned) {
+      return true;
+    }
+    const groupSettings = this.config.groups?.[params.channelId];
+    const requireMention =
+      groupSettings?.requireMention ?? this.config.defaultGroupSettings?.requireMention ?? true;
+    return requireMention === false;
   }
 
   /**
@@ -386,11 +501,12 @@ export class FeishuChannel extends ChannelBase {
    * We identify the bot's key via the mentions array and only remove that one.
    */
   private stripBotMentionFromText(text: string, message: Record<string, unknown>): string {
-    if (!this.botOpenId || !Array.isArray(message.mentions)) {
+    const mentions = normalizeFeishuMentions(message.mentions);
+    if (!this.botOpenId || mentions.length === 0) {
       return text;
     }
     let result = text;
-    for (const m of message.mentions as Record<string, unknown>[]) {
+    for (const m of mentions) {
       const mid = m.id as Record<string, unknown> | undefined;
       if (mid?.open_id === this.botOpenId && typeof m.key === 'string') {
         // Remove this specific mention key and trailing space
@@ -404,118 +520,17 @@ export class FeishuChannel extends ChannelBase {
   }
 
   /**
-   * Parse message content based on type
-   */
-  private parseMessageContent(message: Record<string, unknown>): RemoteContent | null {
-    const msgType = message.message_type as string;
-
-    try {
-      const contentJson = JSON.parse(message.content as string) as Record<string, unknown>;
-
-      switch (msgType) {
-        case 'text':
-          return {
-            type: 'text',
-            text: contentJson.text as string | undefined,
-          };
-
-        case 'image':
-          return {
-            type: 'image',
-            imageKey: contentJson.image_key as string | undefined,
-          };
-
-        case 'file':
-          return {
-            type: 'file',
-            file: {
-              name: contentJson.file_name as string,
-              key: contentJson.file_key as string | undefined,
-              size: contentJson.file_size as number | undefined,
-            },
-          };
-
-        case 'audio':
-          return {
-            type: 'voice',
-            voice: {
-              key: contentJson.file_key as string | undefined,
-              duration: contentJson.duration as number | undefined,
-            },
-          };
-
-        case 'post':
-          // Rich text post
-          return {
-            type: 'rich_text',
-            text: this.extractTextFromPost(contentJson),
-            richText: contentJson,
-          };
-
-        case 'interactive':
-          return {
-            type: 'interactive',
-            interactive: contentJson,
-          };
-
-        default:
-          log('[Feishu] Unknown message type:', msgType);
-          return {
-            type: 'text',
-            text: `[不支持的消息类型: ${msgType}]`,
-          };
-      }
-    } catch (error) {
-      logError('[Feishu] Failed to parse message content:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Extract plain text from rich text post
-   */
-  private extractTextFromPost(post: Record<string, unknown>): string {
-    const texts: string[] = [];
-
-    try {
-      const zhCn = post.zh_cn as Record<string, unknown> | undefined;
-      const enUs = post.en_us as Record<string, unknown> | undefined;
-      const rawContent = post.content || zhCn?.content || enUs?.content || [];
-      const content = Array.isArray(rawContent) ? (rawContent as unknown[][]) : [];
-
-      for (const paragraph of content) {
-        for (const el of paragraph) {
-          const element = el as Record<string, unknown>;
-          if (element.tag === 'text') {
-            texts.push(String(element.text || ''));
-          } else if (element.tag === 'at') {
-            texts.push(`@${element.user_name || element.user_id || ''}`);
-          }
-        }
-        texts.push('\n');
-      }
-    } catch (error) {
-      logError('[Feishu] Failed to extract text from post:', error);
-    }
-
-    return texts.join('').trim();
-  }
-
-  /**
    * Check if the bot was mentioned in the message
    */
   private checkMentioned(message: Record<string, unknown>): boolean {
-    if (!message.mentions || !this.botOpenId) {
+    if (!this.botOpenId) {
       return false;
     }
 
-    return (
-      Array.isArray(message.mentions) &&
-      message.mentions.some((m: Record<string, unknown>) => {
-        const mid = m.id as Record<string, unknown> | undefined;
-        return mid?.open_id === this.botOpenId || m.key === '@_all';
-      })
-    );
+    return normalizeFeishuMentions(message.mentions).some((m) => {
+      const mid = m.id as Record<string, unknown> | undefined;
+      return mid?.open_id === this.botOpenId || m.key === '@_all';
+    });
   }
 
   /**

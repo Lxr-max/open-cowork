@@ -64,11 +64,9 @@ import {
   toUserFacingErrorText,
 } from './agent-runner-message-end';
 import {
-  applyPiModelRuntimeOverrides,
-  buildSyntheticPiModel,
+  buildSyntheticPiModelFromRuntimeConfig,
   resolvePiRegistryModel,
   resolvePiRouteProtocol,
-  resolveSyntheticPiModelFallback,
 } from './pi-model-resolution';
 import { buildPiSessionRuntimeSignature } from './pi-session-runtime';
 import {
@@ -1612,31 +1610,12 @@ ${hints.join('\n')}
 
       if (!piModel) {
         usedSyntheticModel = true;
-        // Synthetic fallback: construct a Model for unknown/custom models
-        const synthetic = resolveSyntheticPiModelFallback({
-          rawModel: runtimeConfig.model,
+        // Synthetic fallback: construct a Model for unknown/custom models.
+        // Reads contextWindow/maxTokens from the flat runtime AppConfig.
+        piModel = buildSyntheticPiModelFromRuntimeConfig(runtimeConfig, {
           resolvedModelString: modelString,
-          rawProvider: runtimeConfig.provider,
           routeProtocol: configProtocol,
-          baseUrl: effectiveBaseUrl,
-        });
-        piModel = buildSyntheticPiModel(
-          synthetic.modelId,
-          synthetic.provider,
-          configProtocol,
           effectiveBaseUrl,
-          undefined,
-          undefined,
-          runtimeConfig.contextWindow,
-          runtimeConfig.maxTokens
-        );
-        // Apply the same runtime overrides (developer role compat, base URL, API downgrade)
-        // that resolvePiRegistryModel applies to registry models
-        piModel = applyPiModelRuntimeOverrides(piModel, {
-          configProvider: configProtocol,
-          customBaseUrl: effectiveBaseUrl,
-          rawProvider: runtimeConfig.provider,
-          customProtocol: runtimeConfig.customProtocol,
         });
         logCtxWarn(
           '[CoworkAgentRunner] Model not in pi-ai registry, using synthetic model:',

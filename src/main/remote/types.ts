@@ -113,10 +113,10 @@ export interface FeishuChannelConfig {
   /** App Secret from Feishu Open Platform */
   appSecret: string;
 
-  /** Verification token for webhook validation */
+  /** Verification Token for URL challenge requests (not used as X-Lark-Signature key) */
   verificationToken?: string;
 
-  /** Encrypt key for message encryption */
+  /** Encrypt Key for X-Lark-Signature (SHA256) and optional payload encryption */
   encryptKey?: string;
 
   /** Use WebSocket mode instead of webhook (recommended for local dev) */
@@ -334,6 +334,10 @@ export interface RemoteContent {
   /** Image URL or key (for image type) */
   imageUrl?: string;
   imageKey?: string;
+
+  /** Downloaded image payload (for image type, after channel resolution) */
+  imageBase64?: string;
+  imageMediaType?: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
 
   /** File information (for file type) */
   file?: {

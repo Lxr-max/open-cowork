@@ -34,6 +34,7 @@ import {
   type AppTheme,
   type CreateConfigSetPayload,
 } from './config/config-store';
+import { buildAgentRuntimeSignature } from './config/agent-runtime-signature';
 import {
   startConfigFileWatcher,
   stopConfigFileWatcher,
@@ -1157,13 +1158,13 @@ app
 
         // Set up RemoteManager with StdioChannel
         const stdioAgentExecutor: AgentExecutor = {
-          startSession: async (title, prompt, cwd) => {
+          startSession: async (title, prompt, cwd, content) => {
             if (!sessionManager) throw new Error('Session manager not initialized');
             const unsupportedReason = getWorkspacePathUnsupportedReason(cwd);
             if (unsupportedReason) {
               throw new Error(unsupportedReason);
             }
-            return sessionManager.startSession(title, prompt, cwd);
+            return sessionManager.startSession(title, prompt, cwd, undefined, content);
           },
           continueSession: async (sessionId, prompt, content) => {
             if (!sessionManager) throw new Error('Session manager not initialized');
@@ -1446,13 +1447,13 @@ app
     // 初始化远程管理器
     remoteManager.setRendererCallback(sendToRenderer);
     const agentExecutor: AgentExecutor = {
-      startSession: async (title, prompt, cwd) => {
+      startSession: async (title, prompt, cwd, content) => {
         if (!sessionManager) throw new Error('Session manager not initialized');
         const unsupportedReason = getWorkspacePathUnsupportedReason(cwd);
         if (unsupportedReason) {
           throw new Error(unsupportedReason);
         }
-        return sessionManager.startSession(title, prompt, cwd);
+        return sessionManager.startSession(title, prompt, cwd, undefined, content);
       },
       continueSession: async (sessionId, prompt, content, cwd) => {
         if (!sessionManager) throw new Error('Session manager not initialized');
@@ -1903,18 +1904,6 @@ ipcMain.handle('config.getPresets', () => {
     return [];
   }
 });
-
-const buildAgentRuntimeSignature = (config: AppConfig): string =>
-  JSON.stringify({
-    provider: config.provider,
-    apiKey: config.apiKey,
-    baseUrl: config.baseUrl,
-    customProtocol: config.customProtocol,
-    model: config.model,
-    enableThinking: config.enableThinking,
-    memoryEnabled: config.memoryEnabled,
-    memoryRuntime: config.memoryRuntime,
-  });
 
 const syncConfigAfterMutation = async (previousConfig: AppConfig) => {
   // Mark as configured if any config set has usable credentials
