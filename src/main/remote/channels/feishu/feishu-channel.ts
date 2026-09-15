@@ -19,6 +19,15 @@ import { FeishuAPI } from './feishu-api';
 import { FeishuWSClient } from './feishu-ws-client';
 import { parseFeishuMessageContent, resolveFeishuRemoteContent } from './feishu-message-content';
 
+function normalizeFeishuMentions(mentions: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(mentions)) {
+    return [];
+  }
+  return mentions.filter(
+    (item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object'
+  );
+}
+
 export class FeishuChannel extends ChannelBase {
   readonly type = 'feishu' as const;
 
@@ -427,13 +436,24 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
 
+    const mentions = normalizeFeishuMentions(params.mentions);
+    const isMentioned = this.checkMentioned({ mentions });
+    const shouldProcess = this.shouldProcessMessage({
+      isGroup: params.isGroup,
+      isMentioned,
+      channelId: params.channelId,
+    });
+
     if (parsed.type === 'text' && parsed.text) {
-      parsed.text = this.stripBotMentionFromText(parsed.text, { mentions: params.mentions });
+      parsed.text = this.stripBotMentionFromText(parsed.text, { mentions });
     }
 
-    const content = await resolveFeishuRemoteContent(parsed, (imageKey) =>
-      this.api.downloadImage(imageKey)
-    );
+    // Download imageKey only after the mention/eligibility gate. Unmentioned
+    // group images are still emitted (cheap) so Gateway auth/pairing can run,
+    // but we skip Feishu image downloads that would be discarded.
+    const content = shouldProcess
+      ? await resolveFeishuRemoteContent(parsed, (imageKey) => this.api.downloadImage(imageKey))
+      : parsed;
 
     const remoteMessage: RemoteMessage = {
       id: params.id,
@@ -447,11 +467,32 @@ export class FeishuChannel extends ChannelBase {
       content,
       timestamp: params.timestamp,
       isGroup: params.isGroup,
-      isMentioned: this.checkMentioned({ mentions: params.mentions }),
+      isMentioned,
       raw: params.raw,
     };
 
     this.emitMessage(remoteMessage);
+  }
+
+  /**
+   * Group messages require @mention unless this chat's settings say otherwise.
+   * DMs are always eligible. Matches Gateway's default "require mention in groups".
+   */
+  private shouldProcessMessage(params: {
+    isGroup: boolean;
+    isMentioned: boolean;
+    channelId: string;
+  }): boolean {
+    if (!params.isGroup) {
+      return true;
+    }
+    if (params.isMentioned) {
+      return true;
+    }
+    const groupSettings = this.config.groups?.[params.channelId];
+    const requireMention =
+      groupSettings?.requireMention ?? this.config.defaultGroupSettings?.requireMention ?? true;
+    return requireMention === false;
   }
 
   /**
@@ -460,11 +501,12 @@ export class FeishuChannel extends ChannelBase {
    * We identify the bot's key via the mentions array and only remove that one.
    */
   private stripBotMentionFromText(text: string, message: Record<string, unknown>): string {
-    if (!this.botOpenId || !Array.isArray(message.mentions)) {
+    const mentions = normalizeFeishuMentions(message.mentions);
+    if (!this.botOpenId || mentions.length === 0) {
       return text;
     }
     let result = text;
-    for (const m of message.mentions as Record<string, unknown>[]) {
+    for (const m of mentions) {
       const mid = m.id as Record<string, unknown> | undefined;
       if (mid?.open_id === this.botOpenId && typeof m.key === 'string') {
         // Remove this specific mention key and trailing space
@@ -481,17 +523,14 @@ export class FeishuChannel extends ChannelBase {
    * Check if the bot was mentioned in the message
    */
   private checkMentioned(message: Record<string, unknown>): boolean {
-    if (!message.mentions || !this.botOpenId) {
+    if (!this.botOpenId) {
       return false;
     }
 
-    return (
-      Array.isArray(message.mentions) &&
-      message.mentions.some((m: Record<string, unknown>) => {
-        const mid = m.id as Record<string, unknown> | undefined;
-        return mid?.open_id === this.botOpenId || m.key === '@_all';
-      })
-    );
+    return normalizeFeishuMentions(message.mentions).some((m) => {
+      const mid = m.id as Record<string, unknown> | undefined;
+      return mid?.open_id === this.botOpenId || m.key === '@_all';
+    });
   }
 
   /**

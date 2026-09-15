@@ -29,14 +29,14 @@ export function convertRemoteContentToBlocks(content: RemoteContent): RemoteCont
 
     case 'file':
       return {
-        blocks: [{ type: 'text', text: describeUnsupportedFile(content) } as TextContent],
-        deliverToAgent: false,
+        blocks: [{ type: 'text', text: describeFileContent(content) } as TextContent],
+        deliverToAgent: true,
       };
 
     case 'voice':
       return {
-        blocks: [{ type: 'text', text: describeUnsupportedVoice(content) } as TextContent],
-        deliverToAgent: false,
+        blocks: [{ type: 'text', text: describeVoiceContent(content) } as TextContent],
+        deliverToAgent: true,
       };
 
     default:
@@ -90,10 +90,10 @@ function convertImageContent(content: RemoteContent): RemoteContentConversion {
   };
 }
 
-function describeUnsupportedFile(content: RemoteContent): string {
+function describeFileContent(content: RemoteContent): string {
   const file = content.file;
   if (!file) {
-    return '[暂不支持处理文件消息]';
+    return '[用户发送了文件]';
   }
   const details = [
     file.name,
@@ -101,13 +101,13 @@ function describeUnsupportedFile(content: RemoteContent): string {
     file.size != null ? `size=${file.size}` : undefined,
     file.mimeType ? `mimeType=${file.mimeType}` : undefined,
   ].filter(Boolean);
-  return `[暂不支持处理该文件: ${details.join(', ')}]`;
+  return `[用户发送了文件: ${details.join(', ')}]`;
 }
 
-function describeUnsupportedVoice(content: RemoteContent): string {
+function describeVoiceContent(content: RemoteContent): string {
   const voice = content.voice;
   if (!voice) {
-    return '[暂不支持处理语音消息]';
+    return '[用户发送了语音消息]';
   }
   const details = [
     voice.key ? `voiceKey=${voice.key}` : undefined,
@@ -115,7 +115,7 @@ function describeUnsupportedVoice(content: RemoteContent): string {
     voice.url ? `url=${voice.url}` : undefined,
   ].filter(Boolean);
   if (details.length === 0) {
-    return '[暂不支持处理语音消息]';
+    return '[用户发送了语音消息]';
   }
-  return `[暂不支持处理语音消息: ${details.join(', ')}]`;
+  return `[用户发送了语音消息: ${details.join(', ')}]`;
 }

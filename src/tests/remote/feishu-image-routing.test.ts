@@ -60,6 +60,51 @@ function channelConfig(): FeishuChannelConfig {
   };
 }
 
+function setBotOpenId(channel: FeishuChannel, openId: string): void {
+  (channel as unknown as { botOpenId: string }).botOpenId = openId;
+}
+
+async function handleWebSocketMessage(
+  channel: FeishuChannel,
+  data: Record<string, unknown>
+): Promise<void> {
+  await (
+    channel as unknown as {
+      handleWebSocketMessage: (payload: Record<string, unknown>) => Promise<void>;
+    }
+  ).handleWebSocketMessage(data);
+}
+
+function imageWebhookBody(overrides: {
+  chatType?: string;
+  mentions?: unknown;
+  imageKey?: string;
+  eventId?: string;
+}): string {
+  return JSON.stringify({
+    schema: '2.0',
+    header: {
+      event_id: overrides.eventId ?? 'img-event',
+      token: VERIFICATION_TOKEN,
+      create_time: '1603977298000',
+      event_type: 'im.message.receive_v1',
+      tenant_key: '2d8a0e17d6c7622d',
+      app_id: 'cli_test',
+    },
+    event: {
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      message: {
+        message_id: 'om_img',
+        chat_id: 'oc_chat',
+        chat_type: overrides.chatType ?? 'p2p',
+        message_type: 'image',
+        content: JSON.stringify({ image_key: overrides.imageKey ?? 'img_v2_repro' }),
+        ...(overrides.mentions !== undefined ? { mentions: overrides.mentions } : {}),
+      },
+    },
+  });
+}
+
 function buildMessage(content: RemoteContent): RemoteMessage {
   return {
     id: 'msg-1',
@@ -136,6 +181,38 @@ describe('convertRemoteContentToBlocks', () => {
       },
     ]);
   });
+
+  it('delivers file and voice descriptions to the agent', () => {
+    expect(
+      convertRemoteContentToBlocks({
+        type: 'file',
+        file: { name: 'report.pdf', key: 'file_v2_repro', size: 42 },
+      })
+    ).toEqual({
+      deliverToAgent: true,
+      blocks: [
+        {
+          type: 'text',
+          text: '[用户发送了文件: report.pdf, fileKey=file_v2_repro, size=42]',
+        },
+      ],
+    });
+
+    expect(
+      convertRemoteContentToBlocks({
+        type: 'voice',
+        voice: { key: 'voice_v2_repro', duration: 12 },
+      })
+    ).toEqual({
+      deliverToAgent: true,
+      blocks: [
+        {
+          type: 'text',
+          text: '[用户发送了语音消息: voiceKey=voice_v2_repro, duration=12s]',
+        },
+      ],
+    });
+  });
 });
 
 describe('MessageRouter imageKey routing', () => {
@@ -167,6 +244,35 @@ describe('MessageRouter imageKey routing', () => {
     expect(result.content).toBeUndefined();
     expect(result.prompt).toBeUndefined();
     expect(result.notices).toEqual(['[图片无法处理: 未能下载 imageKey=img_v2_repro 的图片内容]']);
+  });
+
+  it('delivers file and voice messages to the agent instead of a channel-only notice', async () => {
+    const fileResult = await routeAndCapture({
+      type: 'file',
+      file: { name: 'report.pdf', key: 'file_v2_repro', size: 42 },
+    });
+    const voiceResult = await routeAndCapture({
+      type: 'voice',
+      voice: { key: 'voice_v2_repro', duration: 12 },
+    });
+
+    expect(fileResult.prompt).toBe('请处理上述内容');
+    expect(fileResult.content).toEqual([
+      {
+        type: 'text',
+        text: '[用户发送了文件: report.pdf, fileKey=file_v2_repro, size=42]',
+      },
+    ]);
+    expect(fileResult.notices).toEqual([]);
+
+    expect(voiceResult.prompt).toBe('请处理上述内容');
+    expect(voiceResult.content).toEqual([
+      {
+        type: 'text',
+        text: '[用户发送了语音消息: voiceKey=voice_v2_repro, duration=12s]',
+      },
+    ]);
+    expect(voiceResult.notices).toEqual([]);
   });
 });
 
@@ -226,27 +332,7 @@ describe('FeishuChannel webhook imageKey resolution', () => {
       channel.onMessage(resolve);
     });
 
-    const body = JSON.stringify({
-      schema: '2.0',
-      header: {
-        event_id: 'img-event',
-        token: VERIFICATION_TOKEN,
-        create_time: '1603977298000',
-        event_type: 'im.message.receive_v1',
-        tenant_key: '2d8a0e17d6c7622d',
-        app_id: 'cli_test',
-      },
-      event: {
-        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
-        message: {
-          message_id: 'om_img',
-          chat_id: 'oc_chat',
-          chat_type: 'p2p',
-          message_type: 'image',
-          content: JSON.stringify({ image_key: 'img_v2_repro' }),
-        },
-      },
-    });
+    const body = imageWebhookBody({});
 
     const result = channel.handleWebhook(signedHeaders(officialSha256Signature(body)), body);
     expect(result).toEqual({ status: 200, data: { code: 0 } });
@@ -272,27 +358,7 @@ describe('FeishuChannel webhook imageKey resolution', () => {
       channel.onMessage(resolve);
     });
 
-    const body = JSON.stringify({
-      schema: '2.0',
-      header: {
-        event_id: 'img-fail',
-        token: VERIFICATION_TOKEN,
-        create_time: '1603977298000',
-        event_type: 'im.message.receive_v1',
-        tenant_key: '2d8a0e17d6c7622d',
-        app_id: 'cli_test',
-      },
-      event: {
-        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
-        message: {
-          message_id: 'om_img_fail',
-          chat_id: 'oc_chat',
-          chat_type: 'p2p',
-          message_type: 'image',
-          content: JSON.stringify({ image_key: 'img_v2_repro' }),
-        },
-      },
-    });
+    const body = imageWebhookBody({ eventId: 'img-fail' });
 
     const result = channel.handleWebhook(signedHeaders(officialSha256Signature(body)), body);
     expect(result.status).toBe(200);
@@ -311,11 +377,7 @@ describe('FeishuChannel webhook imageKey resolution', () => {
       channel.onMessage(resolve);
     });
 
-    await (
-      channel as unknown as {
-        handleWebSocketMessage: (data: Record<string, unknown>) => Promise<void>;
-      }
-    ).handleWebSocketMessage({
+    await handleWebSocketMessage(channel, {
       messageId: 'om_ws',
       chatId: 'oc_chat',
       chatType: 'p2p',
@@ -334,5 +396,144 @@ describe('FeishuChannel webhook imageKey resolution', () => {
       imageBase64: PNG_1X1.toString('base64'),
       imageMediaType: 'image/png',
     });
+  });
+
+  it('sends a notice and does not invoke the agent when downloadImage fails', async () => {
+    const channel = new FeishuChannel(channelConfig(), {
+      downloadImage: async () => {
+        throw new Error('Failed to download image: Not Found');
+      },
+    } as unknown as FeishuAPI);
+    const router = new MessageRouter();
+    let agentInvoked = false;
+    const notices: string[] = [];
+
+    router.setAgentCallback(async () => {
+      agentInvoked = true;
+    });
+    const noticed = new Promise<void>((resolve) => {
+      router.onResponse(async (response) => {
+        if (response.content.type === 'text' && response.content.text) {
+          notices.push(response.content.text);
+          resolve();
+        }
+      });
+    });
+    channel.onMessage((message) => {
+      void router.routeMessage(message);
+    });
+
+    const body = imageWebhookBody({ eventId: 'img-download-fail' });
+    expect(channel.handleWebhook(signedHeaders(officialSha256Signature(body)), body).status).toBe(
+      200
+    );
+
+    await noticed;
+    expect(agentInvoked).toBe(false);
+    expect(notices).toEqual(['[图片无法处理: 未能下载 imageKey=img_v2_repro 的图片内容]']);
+    router.stopPeriodicCleanup();
+  });
+
+  it('does not download group images that fail the mention gate', async () => {
+    const downloadImage = vi.fn(async () => PNG_1X1);
+    const channel = new FeishuChannel(channelConfig(), {
+      downloadImage,
+    } as unknown as FeishuAPI);
+    setBotOpenId(channel, 'ou_bot');
+
+    const received = new Promise<RemoteMessage>((resolve) => {
+      channel.onMessage(resolve);
+    });
+
+    const body = imageWebhookBody({
+      chatType: 'group',
+      eventId: 'img-group-unmentioned',
+      mentions: [{ id: { open_id: 'ou_other' }, key: '@_user_1' }],
+    });
+    channel.handleWebhook(signedHeaders(officialSha256Signature(body)), body);
+
+    const message = await received;
+    expect(downloadImage).not.toHaveBeenCalled();
+    expect(message.isGroup).toBe(true);
+    expect(message.isMentioned).toBe(false);
+    expect(message.content).toEqual({ type: 'image', imageKey: 'img_v2_repro' });
+  });
+
+  it('downloads group images after the bot is mentioned', async () => {
+    const downloadImage = vi.fn(async () => PNG_1X1);
+    const channel = new FeishuChannel(channelConfig(), {
+      downloadImage,
+    } as unknown as FeishuAPI);
+    setBotOpenId(channel, 'ou_bot');
+
+    const received = new Promise<RemoteMessage>((resolve) => {
+      channel.onMessage(resolve);
+    });
+
+    const body = imageWebhookBody({
+      chatType: 'group',
+      eventId: 'img-group-mentioned',
+      mentions: [{ id: { open_id: 'ou_bot' }, key: '@_user_1' }],
+    });
+    channel.handleWebhook(signedHeaders(officialSha256Signature(body)), body);
+
+    const message = await received;
+    expect(downloadImage).toHaveBeenCalledWith('img_v2_repro');
+    expect(message.isMentioned).toBe(true);
+    expect(message.content.imageBase64).toBe(PNG_1X1.toString('base64'));
+  });
+
+  it('tolerates WebSocket mentions: undefined without throwing and still gates groups', async () => {
+    const downloadImage = vi.fn(async () => PNG_1X1);
+    const channel = new FeishuChannel(channelConfig(), {
+      downloadImage,
+    } as unknown as FeishuAPI);
+    setBotOpenId(channel, 'ou_bot');
+
+    const dmReceived = new Promise<RemoteMessage>((resolve) => {
+      channel.onMessage(resolve);
+    });
+
+    await expect(
+      handleWebSocketMessage(channel, {
+        messageId: 'om_ws_undef',
+        chatId: 'oc_chat',
+        chatType: 'p2p',
+        senderId: 'ou_user',
+        senderType: 'user',
+        messageType: 'image',
+        content: JSON.stringify({ image_key: 'img_v2_repro' }),
+        createTime: '1603977298000',
+        mentions: undefined,
+      })
+    ).resolves.toBeUndefined();
+
+    const dmMessage = await dmReceived;
+    expect(dmMessage.isMentioned).toBe(false);
+    expect(downloadImage).toHaveBeenCalledTimes(1);
+
+    downloadImage.mockClear();
+    const groupReceived = new Promise<RemoteMessage>((resolve) => {
+      channel.onMessage(resolve);
+    });
+
+    await expect(
+      handleWebSocketMessage(channel, {
+        messageId: 'om_ws_group_undef',
+        chatId: 'oc_group',
+        chatType: 'group',
+        senderId: 'ou_user',
+        senderType: 'user',
+        messageType: 'image',
+        content: JSON.stringify({ image_key: 'img_v2_repro' }),
+        createTime: '1603977298000',
+        mentions: undefined,
+      })
+    ).resolves.toBeUndefined();
+
+    const groupMessage = await groupReceived;
+    expect(groupMessage.isGroup).toBe(true);
+    expect(groupMessage.isMentioned).toBe(false);
+    expect(downloadImage).not.toHaveBeenCalled();
   });
 });
