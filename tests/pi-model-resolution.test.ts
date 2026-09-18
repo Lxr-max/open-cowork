@@ -193,6 +193,7 @@ describe('pi model resolution helpers', () => {
 
     expect(model.baseUrl).toBe('https://api.moonshot.cn/v1');
     expect(model.compat?.supportsDeveloperRole).toBe(false);
+    expect(model.compat?.supportsStrictMode).toBe(false);
   });
 
   it('keeps developer role enabled for first-party openai endpoints', () => {
@@ -217,6 +218,7 @@ describe('pi model resolution helpers', () => {
     );
 
     expect(model.compat?.supportsDeveloperRole).toBeUndefined();
+    expect(model.compat?.supportsStrictMode).toBeUndefined();
   });
 
   it('auto-detects reasoning models by model id pattern', () => {
@@ -339,6 +341,7 @@ describe('pi model resolution helpers', () => {
 
     expect(model.baseUrl).toBe('http://localhost:11434/v1');
     expect(model.compat?.supportsDeveloperRole).toBe(false);
+    expect(model.compat?.supportsStrictMode).toBe(false);
   });
 
   it('maps ollama thinking off to reasoning_effort none for reasoning models', () => {
@@ -390,6 +393,7 @@ describe('pi model resolution helpers', () => {
     );
 
     expect(model.compat?.supportsDeveloperRole).toBe(false);
+    expect(model.compat?.supportsStrictMode).toBe(false);
   });
 
   it('disables supportsStore alongside developer role for non-standard endpoints', () => {
@@ -415,6 +419,7 @@ describe('pi model resolution helpers', () => {
 
     expect(model.compat?.supportsDeveloperRole).toBe(false);
     expect(model.compat?.supportsStore).toBe(false);
+    expect(model.compat?.supportsStrictMode).toBe(false);
   });
 
   it('preserves existing compat fields when disabling developer role', () => {
@@ -443,6 +448,7 @@ describe('pi model resolution helpers', () => {
 
     expect(model.compat?.supportsDeveloperRole).toBe(false);
     expect(model.compat?.supportsStore).toBe(false);
+    expect(model.compat?.supportsStrictMode).toBe(false);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((model.compat as any)?.supportsStreaming).toBe(true);
   });
@@ -517,5 +523,23 @@ describe('pi model resolution helpers', () => {
     );
 
     expect(model.compat?.requiresThinkingInContent).toBeUndefined();
+  });
+
+  it('omits proprietary tool strict mode for TokenMix-style custom OpenAI endpoints', () => {
+    const model = applyPiModelRuntimeOverrides(
+      buildSyntheticPiModel('gemini-3.1-pro', 'openai', 'openai', 'https://api.tokenmix.ai/v1'),
+      {
+        configProvider: 'openai',
+        rawProvider: 'custom',
+        customProtocol: 'openai',
+        customBaseUrl: 'https://api.tokenmix.ai/v1',
+      }
+    );
+
+    expect(model.api).toBe('openai-completions');
+    expect(model.baseUrl).toBe('https://api.tokenmix.ai/v1');
+    expect(model.compat?.supportsDeveloperRole).toBe(false);
+    expect(model.compat?.supportsStore).toBe(false);
+    expect(model.compat?.supportsStrictMode).toBe(false);
   });
 });

@@ -70,6 +70,23 @@ function shouldDisableDeveloperRoleForEndpoint(
   return true;
 }
 
+/**
+ * Relays such as TokenMix validate Chat Completions tool objects strictly and
+ * 400 on proprietary OpenAI fields (`strict` inside `function`, `store`,
+ * `developer` role). pi-ai omits `strict` when `supportsStrictMode` is false.
+ */
+function applyOpenAICompatibleRelayCompat(model: Model<Api>): Model<Api> {
+  return {
+    ...model,
+    compat: {
+      ...(model.compat || {}),
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsStrictMode: false,
+    },
+  } as Model<Api>;
+}
+
 function shouldPreserveOpenAIResponsesApi(
   model: Model<Api>,
   options: PiModelLookupOptions
@@ -294,14 +311,7 @@ export function applyPiModelRuntimeOverrides(
     nextModel = { ...nextModel, api: 'openai-completions' } as typeof nextModel;
   }
   if (shouldDisableDeveloperRoleForEndpoint(nextModel, options)) {
-    nextModel = {
-      ...nextModel,
-      compat: {
-        ...(nextModel.compat || {}),
-        supportsDeveloperRole: false,
-        supportsStore: false,
-      },
-    } as typeof nextModel;
+    nextModel = applyOpenAICompatibleRelayCompat(nextModel);
   }
 
   if (
