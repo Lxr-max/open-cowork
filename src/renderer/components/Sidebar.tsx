@@ -203,6 +203,8 @@ export function Sidebar() {
 
   const handleDeleteSession = (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!window.confirm(t('sidebar.deleteConfirm', { title: session?.title ?? '' }))) return;
     deleteSession(sessionId);
   };
 
