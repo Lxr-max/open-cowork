@@ -66,4 +66,36 @@ describe('MCPConfigStore malformed document healing', () => {
     expect(enabled.some((server) => server.name === 'tavily-mcp')).toBe(true);
     expect(storeState.data.mcpServers).toBeUndefined();
   });
+
+  it('heals JSON-string servers into a persisted array', () => {
+    const tavily = loadFixture('mcp-config-agent-tavily.json');
+    storeState.data = { servers: JSON.stringify(tavily.servers) };
+
+    const servers = mcpConfigStore.getServers();
+    expect(servers).toHaveLength(1);
+    expect(servers[0].name).toBe('tavily-mcp');
+    expect(Array.isArray(storeState.data.servers)).toBe(true);
+    expect((storeState.data.servers as Array<{ name: string }>)[0].name).toBe('tavily-mcp');
+  });
+
+  it('does not overwrite an unreadable servers string with an empty array', () => {
+    storeState.data = { servers: 'not-json-config' };
+
+    const servers = mcpConfigStore.getServers();
+    expect(servers).toEqual([]);
+    expect(storeState.data.servers).toBe('not-json-config');
+  });
+
+  it('adopts mcpServers when the store document also has a default empty servers array', () => {
+    storeState.data = {
+      servers: [],
+      ...loadFixture('mcp-config-claude-mcpServers.json'),
+    };
+
+    const servers = mcpConfigStore.getServers();
+    expect(servers.some((server) => server.name === 'tavily-mcp')).toBe(true);
+    expect(Array.isArray(storeState.data.servers)).toBe(true);
+    expect((storeState.data.servers as unknown[]).length).toBeGreaterThan(0);
+    expect(storeState.data.mcpServers).toBeUndefined();
+  });
 });

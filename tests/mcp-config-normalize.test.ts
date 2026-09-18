@@ -105,7 +105,56 @@ describe('MCP config normalization (issue #216)', () => {
     expect(normalizeMcpConfigDocument(null).servers).toEqual([]);
     expect(normalizeMcpConfigDocument('not-json').servers).toEqual([]);
     expect(normalizeMcpConfigDocument(42).servers).toEqual([]);
-    expect(normalizeMcpConfigDocument({ servers: 'oops' }).servers).toEqual([]);
+  });
+
+  it('parses a JSON-string servers map instead of falling through to empty', () => {
+    const document = loadFixture('mcp-config-agent-tavily.json') as { servers: unknown };
+    const result = normalizeMcpConfigDocument({
+      servers: JSON.stringify(document.servers),
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.repaired).toBe(true);
+    expect(result.source).toBe('servers');
+    expect(result.servers).toHaveLength(1);
+    expect(result.servers[0]).toMatchObject({
+      name: 'tavily-mcp',
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', 'tavily-mcp@latest'],
+      enabled: true,
+    });
+  });
+
+  it('parses a JSON-string servers array used by agent-installed configs', () => {
+    const document = loadFixture('mcp-config-mixed-agent-installed.json') as {
+      servers: unknown;
+    };
+    const result = normalizeMcpConfigDocument({
+      servers: JSON.stringify(document.servers),
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.servers).toHaveLength(2);
+    expect(result.servers.map((server) => server.name).sort()).toEqual(['Chrome', 'tavily-mcp']);
+  });
+
+  it('surfaces a clear error for a non-JSON servers string without inventing servers', () => {
+    const result = normalizeMcpConfigDocument({ servers: 'oops' });
+    expect(result.servers).toEqual([]);
+    expect(result.repaired).toBe(true);
+    expect(result.error).toMatch(/servers.*JSON/i);
+  });
+
+  it('adopts mcpServers when electron-store defaults merge an empty servers array', () => {
+    const document = loadFixture('mcp-config-claude-mcpServers.json') as Record<string, unknown>;
+    const result = normalizeMcpConfigDocument({ servers: [], ...document });
+
+    expect(result.source).toBe('mcpServers');
+    expect(result.servers.map((server) => server.name).sort()).toEqual([
+      'tavily-mcp',
+      'tavily-remote',
+    ]);
   });
 
   it('leaves a canonical Open Cowork servers array unchanged', () => {

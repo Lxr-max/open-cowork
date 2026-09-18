@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import type { MCPServerConfig, MCPServerStatus, MCPToolInfo, MCPPreset } from './shared';
 import {
+  formatMcpArgsInput,
   formatMcpCommandLine,
   formatMcpTypeLabel,
   normalizeMcpConfigInput,
@@ -618,7 +619,7 @@ function ServerForm({
   const [name, setName] = useState(server?.name || '');
   const [type, setType] = useState<'stdio' | 'sse' | 'streamable-http'>(server?.type || 'stdio');
   const [command, setCommand] = useState(server?.command || '');
-  const [args, setArgs] = useState(formatMcpCommandLine(undefined, server?.args));
+  const [args, setArgs] = useState(formatMcpArgsInput(server?.args));
   const [url, setUrl] = useState(server?.url || '');
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
   // Environment variables (for tokens, etc.)

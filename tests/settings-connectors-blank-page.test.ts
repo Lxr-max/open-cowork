@@ -1,45 +1,50 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { createElement } from 'react';
 import {
   collectMcpConnectorRenderFields,
-  normalizeMcpConfigDocument,
+  formatMcpTypeLabel,
+  normalizeMcpConfigInput,
 } from '../src/shared/mcp-config';
+import { PanelErrorBoundary } from '../src/renderer/components/PanelErrorBoundary';
 
-const settingsConnectorsPath = path.resolve(
-  process.cwd(),
-  'src/renderer/components/settings/SettingsConnectors.tsx'
-);
 const settingsPanelPath = path.resolve(process.cwd(), 'src/renderer/components/SettingsPanel.tsx');
-const tavilyFixturePath = path.resolve(
-  process.cwd(),
-  'tests/fixtures/mcp-config-agent-tavily.json'
-);
+const fixturesDir = path.resolve(process.cwd(), 'tests/fixtures');
 
-const settingsConnectorsSource = readFileSync(settingsConnectorsPath, 'utf8');
-const settingsPanelSource = readFileSync(settingsPanelPath, 'utf8');
+function loadFixture(name: string): unknown {
+  return JSON.parse(readFileSync(path.join(fixturesDir, name), 'utf8')) as unknown;
+}
+
+/** Same pipeline SettingsConnectors uses after `mcp.getServers()`. */
+function connectorCardsFromIpcPayload(loaded: unknown) {
+  return collectMcpConnectorRenderFields(normalizeMcpConfigInput(loaded).servers);
+}
 
 describe('Settings MCP Connectors blank-page regression (#216)', () => {
-  it('normalizes IPC payloads before storing them in React state', () => {
-    expect(settingsConnectorsSource).toContain('normalizeMcpConfigInput(loaded).servers');
-    expect(settingsConnectorsSource).toContain('formatMcpTypeLabel(server.type)');
-    expect(settingsConnectorsSource).toContain('formatMcpCommandLine(server.command, server.args)');
-    expect(settingsConnectorsSource).not.toContain('server.type.toUpperCase()');
-  });
+  it('turns malformed IPC / agent-installed payloads into renderable connector cards', () => {
+    const tavilyDocument = loadFixture('mcp-config-agent-tavily.json');
+    const mixedDocument = loadFixture('mcp-config-mixed-agent-installed.json');
+    const stringEncoded = {
+      servers: JSON.stringify((tavilyDocument as { servers: unknown }).servers),
+    };
 
-  it('wraps the connectors tab in a recoverable error boundary instead of a blank panel', () => {
-    expect(settingsPanelSource).toContain('name="SettingsConnectors"');
-    expect(settingsPanelSource).toContain('SettingsConnectorsFallback');
-    expect(settingsPanelSource).toContain("t('mcp.pageErrorTitle')");
-    expect(settingsPanelSource).toContain("t('mcp.pageErrorRetry')");
-  });
+    for (const payload of [tavilyDocument, mixedDocument, stringEncoded]) {
+      const cards = connectorCardsFromIpcPayload(payload);
+      expect(cards.length).toBeGreaterThan(0);
+      expect(
+        cards.every(
+          (card) =>
+            typeof card.name === 'string' &&
+            card.name.length > 0 &&
+            typeof card.typeLabel === 'string' &&
+            card.typeLabel.length > 0
+        )
+      ).toBe(true);
+    }
 
-  it('renders connector cards from a realistic agent-installed Tavily mcp-config fixture', () => {
-    const document = JSON.parse(readFileSync(tavilyFixturePath, 'utf8')) as unknown;
-    const servers = normalizeMcpConfigDocument(document).servers;
-    const cards = collectMcpConnectorRenderFields(servers);
-
-    expect(cards).toEqual([
+    const tavilyCards = connectorCardsFromIpcPayload(tavilyDocument);
+    expect(tavilyCards).toEqual([
       expect.objectContaining({
         name: 'tavily-mcp',
         typeLabel: 'STDIO',
@@ -47,5 +52,59 @@ describe('Settings MCP Connectors blank-page regression (#216)', () => {
         enabled: true,
       }),
     ]);
+  });
+
+  it('does not throw when connector type or args are missing (legacy list crash)', () => {
+    expect(formatMcpTypeLabel(undefined)).toBe('STDIO');
+    expect(() =>
+      collectMcpConnectorRenderFields(
+        normalizeMcpConfigInput({
+          servers: [{ name: 'tavily-mcp', command: 'npx', args: '-y tavily-mcp@latest' }],
+        }).servers
+      )
+    ).not.toThrow();
+  });
+
+  it('shows the connectors fallback after a render error and recovers on Retry resetKey', () => {
+    const fallback = createElement('button', { type: 'button' }, 'Retry');
+    const children = createElement('div', null, 'connectors');
+
+    expect(PanelErrorBoundary.getDerivedStateFromError()).toEqual({ hasError: true });
+
+    const recovered = PanelErrorBoundary.getDerivedStateFromProps(
+      {
+        name: 'SettingsConnectors',
+        fallback,
+        children,
+        resetKey: 'connectors:1',
+      },
+      { hasError: true, prevResetKey: 'connectors:0' }
+    );
+    expect(recovered).toEqual({ hasError: false, prevResetKey: 'connectors:1' });
+
+    const boundary = new PanelErrorBoundary({
+      name: 'SettingsConnectors',
+      fallback,
+      children,
+      resetKey: 'connectors:0',
+    });
+    boundary.state = { hasError: true, prevResetKey: 'connectors:0' };
+    expect(boundary.render()).toBe(fallback);
+
+    boundary.state = { hasError: false, prevResetKey: 'connectors:1' };
+    expect(boundary.render()).toBe(children);
+  });
+
+  it('keeps the MCP Connectors tab inside a retryable PanelErrorBoundary', () => {
+    const source = readFileSync(settingsPanelPath, 'utf8');
+    const tabStart = source.indexOf("activeTab === 'connectors'");
+    expect(tabStart).toBeGreaterThan(-1);
+    const connectorsBlock = source.slice(tabStart, tabStart + 1200);
+    expect(connectorsBlock).toMatch(
+      /<PanelErrorBoundary[\s\S]*name="SettingsConnectors"[\s\S]*onRetry[\s\S]*<SettingsConnectors/
+    );
+    expect(source).toMatch(
+      /function SettingsConnectorsFallback[\s\S]*onRetry[\s\S]*mcp\.pageErrorRetry/
+    );
   });
 });

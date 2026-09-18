@@ -73,11 +73,16 @@ export const MCP_SERVER_PRESETS: Record<
 /**
  * MCP Server Configuration Store
  */
+type McpConfigStoreShape = {
+  servers: MCPServerConfig[];
+  mcpServers?: unknown;
+};
+
 class MCPConfigStore {
-  private store: Store<{ servers: MCPServerConfig[] }>;
+  private store: Store<McpConfigStoreShape>;
 
   constructor() {
-    const storeOptions: StoreOptions<{ servers: MCPServerConfig[] }> & { projectName?: string } = {
+    const storeOptions: StoreOptions<McpConfigStoreShape> & { projectName?: string } = {
       name: 'mcp-config',
       projectName: 'open-cowork',
       defaults: {
@@ -85,7 +90,7 @@ class MCPConfigStore {
       },
     };
 
-    this.store = new Store<{ servers: MCPServerConfig[] }>(storeOptions);
+    this.store = new Store<McpConfigStoreShape>(storeOptions);
   }
 
   /**
@@ -99,7 +104,11 @@ class MCPConfigStore {
     try {
       const document = this.readStoreDocument();
       const normalized = normalizeMcpConfigDocument(document);
-      if (normalized.repaired) {
+      if (normalized.error) {
+        logError('[MCPConfigStore] MCP config could not be normalized:', normalized.error);
+      }
+      // Do not persist a failed parse — that would wipe agent-installed string configs.
+      if (normalized.repaired && !normalized.error) {
         this.persistNormalizedServers(normalized);
       }
       return normalized.servers;
@@ -131,8 +140,7 @@ class MCPConfigStore {
       });
       this.store.set('servers', result.servers);
       if (result.source === 'mcpServers') {
-        const storeWithDelete = this.store as unknown as { delete?: (key: string) => void };
-        storeWithDelete.delete?.('mcpServers');
+        this.store.delete('mcpServers');
       }
     } catch (error) {
       logError('[MCPConfigStore] Failed to persist repaired MCP config:', error);

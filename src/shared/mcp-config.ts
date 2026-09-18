@@ -14,6 +14,8 @@ export interface NormalizeMcpConfigResult {
   repaired: boolean;
   source: 'servers' | 'mcpServers' | 'empty' | 'unknown';
   skipped: number;
+  /** Present when a `servers` / `mcpServers` value could not be parsed. */
+  error?: string;
 }
 
 export interface McpConnectorRenderFields {
@@ -68,15 +70,19 @@ function nonEmptyString(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+export function formatMcpArgsInput(args?: unknown): string {
+  if (Array.isArray(args)) {
+    return args.map((item) => String(item)).join(' ');
+  }
+  if (typeof args === 'string') {
+    return args;
+  }
+  return '';
+}
+
 export function formatMcpCommandLine(command?: string, args?: unknown): string {
   const cmd = typeof command === 'string' ? command : '';
-  let argStr = '';
-  if (Array.isArray(args)) {
-    argStr = args.map((item) => String(item)).join(' ');
-  } else if (typeof args === 'string') {
-    argStr = args;
-  }
-  return `${cmd} ${argStr}`.trim();
+  return `${cmd} ${formatMcpArgsInput(args)}`.trim();
 }
 
 export function formatMcpTypeLabel(type: string | undefined): string {
@@ -172,7 +178,10 @@ function normalizeEnabled(raw: unknown): { enabled: boolean; repaired: boolean }
   return { enabled: true, repaired: raw !== undefined };
 }
 
-function coerceServerEntries(value: unknown): Array<{ key?: string; entry: unknown }> {
+function coerceServerEntries(value: unknown): Array<{ key?: string; entry: unknown }> | undefined {
+  if (value == null) {
+    return undefined;
+  }
   const parsed = parseJsonIfString(value);
   if (Array.isArray(parsed)) {
     return parsed.map((entry) => ({ entry }));
@@ -180,7 +189,11 @@ function coerceServerEntries(value: unknown): Array<{ key?: string; entry: unkno
   if (isPlainObject(parsed)) {
     return Object.entries(parsed).map(([key, entry]) => ({ key, entry }));
   }
-  return [];
+  return undefined;
+}
+
+function serversFieldNeedsRepair(value: unknown): boolean {
+  return typeof value === 'string' || !Array.isArray(value);
 }
 
 export function normalizeMcpServerEntry(
@@ -314,22 +327,46 @@ export function normalizeMcpConfigDocument(raw: unknown): NormalizeMcpConfigResu
 
   const serversField = parsed.servers;
   const mcpServersField = parsed.mcpServers ?? parsed.mcp_servers;
+  const serverEntries = coerceServerEntries(serversField);
+  const mcpEntries = coerceServerEntries(mcpServersField);
+  const serversUnreadable = typeof serversField === 'string' && serverEntries === undefined;
+  const mcpUnreadable = mcpServersField != null && mcpEntries === undefined;
 
-  if (Array.isArray(serversField)) {
-    return normalizeEntries(
-      serversField.map((entry) => ({ entry })),
-      'servers',
-      false
-    );
-  }
-
-  if (isPlainObject(serversField) && Object.keys(serversField).length > 0) {
-    return normalizeEntries(coerceServerEntries(serversField), 'servers', true);
+  // Prefer a non-empty `servers` list, including JSON strings and keyed maps.
+  // An empty array must not hide Claude-style `mcpServers` when electron-store
+  // merges `{ servers: [] }` defaults into an agent-installed document.
+  if (serverEntries !== undefined && serverEntries.length > 0) {
+    return normalizeEntries(serverEntries, 'servers', serversFieldNeedsRepair(serversField));
   }
 
   if (mcpServersField != null) {
-    const entries = coerceServerEntries(mcpServersField);
-    return normalizeEntries(entries, 'mcpServers', true);
+    if (mcpUnreadable) {
+      return {
+        servers: [],
+        repaired: true,
+        source: 'mcpServers',
+        skipped: 0,
+        error: serversUnreadable
+          ? 'MCP config `servers` is a string that is not valid JSON (expected an array or object).'
+          : 'MCP config `mcpServers` is not a valid server list or map (expected an object, array, or JSON string).',
+      };
+    }
+    return normalizeEntries(mcpEntries ?? [], 'mcpServers', true);
+  }
+
+  if (serversUnreadable) {
+    return {
+      servers: [],
+      repaired: true,
+      source: 'servers',
+      skipped: 0,
+      error:
+        'MCP config `servers` is a string that is not valid JSON (expected an array or object).',
+    };
+  }
+
+  if (serverEntries !== undefined) {
+    return normalizeEntries(serverEntries, 'servers', serversFieldNeedsRepair(serversField));
   }
 
   if (serversField === undefined && mcpServersField === undefined) {
@@ -338,9 +375,11 @@ export function normalizeMcpConfigDocument(raw: unknown): NormalizeMcpConfigResu
 
   return {
     servers: [],
-    repaired: Array.isArray(serversField) === false,
+    repaired: true,
     source: 'servers',
     skipped: 0,
+    error:
+      'MCP config `servers` has an unsupported type; expected an array, object, or JSON string.',
   };
 }
 
