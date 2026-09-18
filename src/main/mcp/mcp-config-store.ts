@@ -5,12 +5,24 @@ import * as crypto from 'crypto';
 import path from 'path';
 import type { MCPServerConfig } from './mcp-manager';
 import { log, logError } from '../utils/logger';
+import {
+  normalizeMcpConfigDocument,
+  normalizeMcpConfigInput,
+  normalizeMcpServerEntry,
+  type NormalizeMcpConfigResult,
+} from '../../shared/mcp-config';
 
 /**
  * Preset MCP Server Configurations
  * These are common MCP servers that users can quickly add
  */
-export const MCP_SERVER_PRESETS: Record<string, Omit<MCPServerConfig, 'id' | 'enabled'> & { requiresEnv?: string[]; envDescription?: Record<string, string> }> = {
+export const MCP_SERVER_PRESETS: Record<
+  string,
+  Omit<MCPServerConfig, 'id' | 'enabled'> & {
+    requiresEnv?: string[];
+    envDescription?: Record<string, string>;
+  }
+> = {
   chrome: {
     name: 'Chrome',
     type: 'stdio',
@@ -77,10 +89,54 @@ class MCPConfigStore {
   }
 
   /**
-   * Get all MCP server configurations
+   * Get all MCP server configurations.
+   *
+   * Agent-installed or Claude-style documents (object maps, missing `type`/`id`)
+   * are normalized to the Open Cowork array shape so callers never receive a
+   * non-array or crash the settings UI.
    */
   getServers(): MCPServerConfig[] {
-    return this.store.get('servers', []);
+    try {
+      const document = this.readStoreDocument();
+      const normalized = normalizeMcpConfigDocument(document);
+      if (normalized.repaired) {
+        this.persistNormalizedServers(normalized);
+      }
+      return normalized.servers;
+    } catch (error) {
+      logError('[MCPConfigStore] Failed to read MCP servers, returning empty list:', error);
+      return [];
+    }
+  }
+
+  private readStoreDocument(): unknown {
+    try {
+      return this.store.store;
+    } catch (error) {
+      logError('[MCPConfigStore] Failed to read MCP store document:', error);
+      try {
+        return { servers: this.store.get('servers', []) };
+      } catch {
+        return { servers: [] };
+      }
+    }
+  }
+
+  private persistNormalizedServers(result: NormalizeMcpConfigResult): void {
+    try {
+      log('[MCPConfigStore] Repairing malformed MCP config', {
+        source: result.source,
+        skipped: result.skipped,
+        count: result.servers.length,
+      });
+      this.store.set('servers', result.servers);
+      if (result.source === 'mcpServers') {
+        const storeWithDelete = this.store as unknown as { delete?: (key: string) => void };
+        storeWithDelete.delete?.('mcpServers');
+      }
+    } catch (error) {
+      logError('[MCPConfigStore] Failed to persist repaired MCP config:', error);
+    }
   }
 
   /**
@@ -95,15 +151,21 @@ class MCPConfigStore {
    * Add or update a server configuration
    */
   saveServer(config: MCPServerConfig): void {
-    const servers = this.getServers();
-    const index = servers.findIndex((s) => s.id === config.id);
-    
-    if (index >= 0) {
-      servers[index] = config;
-    } else {
-      servers.push(config);
+    const { server } = normalizeMcpServerEntry(config, undefined, new Set());
+    if (!server) {
+      logError('[MCPConfigStore] Refusing to save invalid MCP server config');
+      return;
     }
-    
+
+    const servers = this.getServers();
+    const index = servers.findIndex((s) => s.id === server.id);
+
+    if (index >= 0) {
+      servers[index] = server;
+    } else {
+      servers.push(server);
+    }
+
     this.store.set('servers', servers);
   }
 
@@ -120,14 +182,19 @@ class MCPConfigStore {
    * Update all server configurations
    */
   setServers(servers: MCPServerConfig[]): void {
-    this.store.set('servers', servers);
+    this.store.set('servers', normalizeMcpConfigInput(servers).servers);
   }
 
   /**
    * Get enabled servers only
    */
   getEnabledServers(): MCPServerConfig[] {
-    return this.getServers().filter((s) => s.enabled);
+    try {
+      return this.getServers().filter((s) => s.enabled);
+    } catch (error) {
+      logError('[MCPConfigStore] Failed to read enabled MCP servers:', error);
+      return [];
+    }
   }
 
   /**
@@ -141,7 +208,6 @@ class MCPConfigStore {
    * Get the path to a MCP server file in the mcp directory
    */
   private getMcpServerPath(filename: string): string | null {
-
     // In development: __dirname points to dist-electron/main
     // In production: appPath points to the app.asar or unpacked app
     if (app.isPackaged) {
@@ -225,7 +291,7 @@ class MCPConfigStore {
     if (preset.args) {
       resolvedPreset = {
         ...preset,
-        args: preset.args.map(arg => {
+        args: preset.args.map((arg) => {
           // Software Development server path
           if (arg === '{SOFTWARE_DEV_SERVER_PATH}') {
             return this.getSoftwareDevServerPath() || arg;
