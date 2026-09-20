@@ -81,6 +81,7 @@ import {
   decodePathSafely,
 } from '../shared/local-file-path';
 import { eventRequiresSessionManager } from './client-event-utils';
+import { decideBeforeQuitAction, runShutdownAndQuit } from './app-shutdown';
 import { getUnsupportedWorkspacePathReason } from './workspace-path-constraints';
 import {
   log,
@@ -1503,8 +1504,12 @@ app
     app.quit();
   });
 
-// Flag to prevent double cleanup
+// Flag to prevent double cleanup. Owned exclusively by cleanupSandboxResources().
 let isCleaningUp = false;
+
+// Set once cleanup has completed and the final quit is issued; lets that
+// quit pass through before-quit without being intercepted again.
+let quitReady = false;
 
 function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1596,6 +1601,22 @@ async function cleanupSandboxResources(): Promise<void> {
   // pi-ai doesn't need proxy shutdown
 }
 
+/**
+ * Run full resource cleanup (bounded by a hard timeout so a hung step can
+ * never strand the app), then issue the real quit exactly once.
+ */
+async function shutdownAndQuit(): Promise<void> {
+  await runShutdownAndQuit({
+    cleanup: cleanupSandboxResources,
+    quit: () => app.quit(),
+    withTimeout,
+    onError: (error) => logError('[App] Shutdown cleanup failed, forcing quit:', error),
+    markQuitReady: () => {
+      quitReady = true;
+    },
+  });
+}
+
 // Handle app quit - window-all-closed (primary for Windows/Linux)
 app.on('window-all-closed', async () => {
   // In headless mode there are no windows, so this event fires immediately.
@@ -1606,8 +1627,7 @@ app.on('window-all-closed', async () => {
     // On Windows/Linux, closing all windows means quit.
     // On macOS dev mode, also quit — so vite-plugin-electron can restart cleanly
     // without the old process holding the single-instance lock.
-    await cleanupSandboxResources();
-    app.quit();
+    await shutdownAndQuit();
   }
   // On macOS production, keep app alive — cleanup happens in before-quit
 });
@@ -1618,30 +1638,38 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
 }
 
 // Handle app quit - before-quit (for macOS Cmd+Q and other quit methods)
-app.on('before-quit', async (event) => {
-  if (!isCleaningUp) {
-    // In dev mode, exit quickly — no need for async sandbox cleanup
-    if (process.env.VITE_DEV_SERVER_URL) {
-      stopNavServer();
-      try {
-        closeDatabase();
-      } catch {
-        /* best-effort */
-      }
-      closeLogFile();
-      tray?.destroy();
-      tray = null;
-      return;
-    }
-    // Set the flag immediately before any await to prevent re-entrant cleanup
-    isCleaningUp = true;
-    event.preventDefault();
+app.on('before-quit', (event) => {
+  const action = decideBeforeQuitAction({
+    quitReady,
+    isCleaningUp,
+    isDev: Boolean(process.env.VITE_DEV_SERVER_URL),
+  });
+
+  // Cleanup has completed and shutdownAndQuit() issued this quit — let it through.
+  if (action === 'allow') {
+    return;
+  }
+
+  // In dev mode, exit quickly — no need for async sandbox cleanup
+  if (action === 'dev-fast-exit') {
+    stopNavServer();
     try {
-      await cleanupSandboxResources();
-    } catch (error) {
-      logError('[App] before-quit cleanup failed, forcing quit:', error);
+      closeDatabase();
+    } catch {
+      /* best-effort */
     }
-    app.quit();
+    closeLogFile();
+    tray?.destroy();
+    tray = null;
+    return;
+  }
+
+  // Always hold the quit until cleanup has actually finished. Repeated Cmd+Q
+  // presses land here harmlessly while cleanup runs; shutdownAndQuit()
+  // re-issues the quit exactly once when done (or when its timeout fires).
+  event.preventDefault();
+  if (action === 'start-cleanup') {
+    void shutdownAndQuit();
   }
 });
 
