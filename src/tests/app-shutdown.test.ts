@@ -7,27 +7,27 @@ import {
 
 describe('decideBeforeQuitAction', () => {
   it('lets the final re-issued quit through once cleanup finished', () => {
-    expect(
-      decideBeforeQuitAction({ quitReady: true, isCleaningUp: true, isDev: false })
-    ).toBe('allow');
+    expect(decideBeforeQuitAction({ quitReady: true, isCleaningUp: true, isDev: false })).toBe(
+      'allow'
+    );
   });
 
   it('uses the fast path in dev instead of async sandbox cleanup', () => {
-    expect(
-      decideBeforeQuitAction({ quitReady: false, isCleaningUp: false, isDev: true })
-    ).toBe('dev-fast-exit');
+    expect(decideBeforeQuitAction({ quitReady: false, isCleaningUp: false, isDev: true })).toBe(
+      'dev-fast-exit'
+    );
   });
 
   it('defers a second Cmd+Q received while cleanup is still running', () => {
-    expect(
-      decideBeforeQuitAction({ quitReady: false, isCleaningUp: true, isDev: false })
-    ).toBe('wait');
+    expect(decideBeforeQuitAction({ quitReady: false, isCleaningUp: true, isDev: false })).toBe(
+      'wait'
+    );
   });
 
   it('starts cleanup on the first production quit without requiring a pre-set flag', () => {
-    expect(
-      decideBeforeQuitAction({ quitReady: false, isCleaningUp: false, isDev: false })
-    ).toBe('start-cleanup');
+    expect(decideBeforeQuitAction({ quitReady: false, isCleaningUp: false, isDev: false })).toBe(
+      'start-cleanup'
+    );
   });
 });
 
@@ -80,7 +80,15 @@ describe('runShutdownAndQuit', () => {
   });
 
   it('bounds cleanup with the shutdown timeout label', async () => {
-    const withTimeout = vi.fn(async <T>(operation: Promise<T>) => operation);
+    const timeoutCalls: Array<{ timeoutMs: number; label: string }> = [];
+    const withTimeout = async <T>(
+      operation: Promise<T>,
+      timeoutMs: number,
+      label: string
+    ): Promise<T> => {
+      timeoutCalls.push({ timeoutMs, label });
+      return operation;
+    };
 
     await runShutdownAndQuit({
       cleanup: async () => undefined,
@@ -90,10 +98,8 @@ describe('runShutdownAndQuit', () => {
       markQuitReady: () => undefined,
     });
 
-    expect(withTimeout).toHaveBeenCalledWith(
-      expect.any(Promise),
-      SHUTDOWN_CLEANUP_TIMEOUT_MS,
-      'Shutdown cleanup'
-    );
+    expect(timeoutCalls).toEqual([
+      { timeoutMs: SHUTDOWN_CLEANUP_TIMEOUT_MS, label: 'Shutdown cleanup' },
+    ]);
   });
 });
