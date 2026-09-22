@@ -34,6 +34,7 @@ import {
   type AppTheme,
   type CreateConfigSetPayload,
 } from './config/config-store';
+import { buildAgentRuntimeSignature } from './config/agent-runtime-signature';
 import {
   startConfigFileWatcher,
   stopConfigFileWatcher,
@@ -1903,18 +1904,6 @@ ipcMain.handle('config.getPresets', () => {
     return [];
   }
 });
-
-const buildAgentRuntimeSignature = (config: AppConfig): string =>
-  JSON.stringify({
-    provider: config.provider,
-    apiKey: config.apiKey,
-    baseUrl: config.baseUrl,
-    customProtocol: config.customProtocol,
-    model: config.model,
-    enableThinking: config.enableThinking,
-    memoryEnabled: config.memoryEnabled,
-    memoryRuntime: config.memoryRuntime,
-  });
 
 const syncConfigAfterMutation = async (previousConfig: AppConfig) => {
   // Mark as configured if any config set has usable credentials
