@@ -71,11 +71,15 @@ function shouldDisableDeveloperRoleForEndpoint(
 }
 
 /**
- * Relays such as TokenMix validate Chat Completions tool objects strictly and
- * 400 on proprietary OpenAI fields (`strict` inside `function`, `store`,
- * `developer` role). pi-ai omits `strict` when `supportsStrictMode` is false.
+ * Every non-official OpenAI-compatible endpoint (custom relays such as
+ * TokenMix, local Ollama, OpenRouter) gets the same compat overrides.
+ * Those endpoints 400 on proprietary Chat Completions fields (`strict`
+ * inside `function`, `store`, `developer` role). pi-ai omits `strict` when
+ * `supportsStrictMode` is false. Omitting the field matches OpenAI's default
+ * of non-strict tools, so providers that accept `strict` keep the same
+ * behaviour as an explicit `strict: false`.
  */
-function applyOpenAICompatibleRelayCompat(model: Model<Api>): Model<Api> {
+function applyNonOfficialOpenAICompat(model: Model<Api>): Model<Api> {
   return {
     ...model,
     compat: {
@@ -358,7 +362,7 @@ export function applyPiModelRuntimeOverrides(
     nextModel = { ...nextModel, api: 'openai-completions' } as typeof nextModel;
   }
   if (shouldDisableDeveloperRoleForEndpoint(nextModel, options)) {
-    nextModel = applyOpenAICompatibleRelayCompat(nextModel);
+    nextModel = applyNonOfficialOpenAICompat(nextModel);
   }
 
   if (

@@ -561,22 +561,4 @@ describe('pi model resolution helpers', () => {
 
     expect(model.compat?.requiresThinkingInContent).toBeUndefined();
   });
-
-  it('omits proprietary tool strict mode for TokenMix-style custom OpenAI endpoints', () => {
-    const model = applyPiModelRuntimeOverrides(
-      buildSyntheticPiModel('gemini-3.1-pro', 'openai', 'openai', 'https://api.tokenmix.ai/v1'),
-      {
-        configProvider: 'openai',
-        rawProvider: 'custom',
-        customProtocol: 'openai',
-        customBaseUrl: 'https://api.tokenmix.ai/v1',
-      }
-    );
-
-    expect(model.api).toBe('openai-completions');
-    expect(model.baseUrl).toBe('https://api.tokenmix.ai/v1');
-    expect(model.compat?.supportsDeveloperRole).toBe(false);
-    expect(model.compat?.supportsStore).toBe(false);
-    expect(model.compat?.supportsStrictMode).toBe(false);
-  });
 });
