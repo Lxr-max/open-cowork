@@ -6,8 +6,14 @@ function readDraft(sessionId: string | null): string {
   return useAppStore.getState().sessionInputDrafts[sessionId] ?? '';
 }
 
+function sessionStillExists(sessionId: string): boolean {
+  return useAppStore.getState().sessions.some((session) => session.id === sessionId);
+}
+
 function writeDraft(sessionId: string | null, value: string): void {
-  if (!sessionId) return;
+  // Deleting the active session removes its draft, then ChatView unmounts or
+  // switches away. Writing the in-memory prompt back would orphan that entry.
+  if (!sessionId || !sessionStillExists(sessionId)) return;
   useAppStore.getState().setSessionInputDraft(sessionId, value);
 }
 
