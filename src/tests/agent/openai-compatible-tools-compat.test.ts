@@ -16,7 +16,7 @@ const readFileTool = {
     },
     required: ['path'],
   },
-} as NonNullable<Context['tools']>[number];
+} as unknown as NonNullable<Context['tools']>[number];
 
 async function captureChatCompletionTools(model: Model<'openai-completions'>) {
   let tools: unknown;
@@ -61,9 +61,7 @@ describe('OpenAI-compatible tool request shaping', () => {
     );
     expect(model.api).toBe('openai-completions');
 
-    const fn = functionTool(
-      await captureChatCompletionTools(model as Model<'openai-completions'>)
-    );
+    const fn = functionTool(await captureChatCompletionTools(model as Model<'openai-completions'>));
 
     expect(fn.name).toBe('read_file');
     expect(fn.strict).toBeUndefined();
@@ -86,9 +84,7 @@ describe('OpenAI-compatible tool request shaping', () => {
     );
     expect(model.api).toBe('openai-completions');
 
-    const fn = functionTool(
-      await captureChatCompletionTools(model as Model<'openai-completions'>)
-    );
+    const fn = functionTool(await captureChatCompletionTools(model as Model<'openai-completions'>));
 
     expect(Object.prototype.hasOwnProperty.call(fn, 'strict')).toBe(false);
   });
@@ -104,9 +100,7 @@ describe('OpenAI-compatible tool request shaping', () => {
     );
     expect(model.api).toBe('openai-completions');
 
-    const fn = functionTool(
-      await captureChatCompletionTools(model as Model<'openai-completions'>)
-    );
+    const fn = functionTool(await captureChatCompletionTools(model as Model<'openai-completions'>));
 
     expect(fn.strict).toBe(false);
   });
