@@ -1,15 +1,44 @@
-import { describe, expect, it } from 'vitest';
+/**
+ * @vitest-environment happy-dom
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { createElement } from 'react';
+import { createElement, useState } from 'react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import {
   collectMcpConnectorRenderFields,
   formatMcpTypeLabel,
   normalizeMcpConfigInput,
 } from '../src/shared/mcp-config';
 import { PanelErrorBoundary } from '../src/renderer/components/PanelErrorBoundary';
+import { SettingsConnectors } from '../src/renderer/components/settings/SettingsConnectors';
+import '../src/renderer/i18n/config';
 
-const settingsPanelPath = path.resolve(process.cwd(), 'src/renderer/components/SettingsPanel.tsx');
+interface McpTestApi {
+  getServers: ReturnType<typeof vi.fn>;
+  getPresets: ReturnType<typeof vi.fn>;
+  getServerStatus: ReturnType<typeof vi.fn>;
+  getTools: ReturnType<typeof vi.fn>;
+  saveServer: ReturnType<typeof vi.fn>;
+  deleteServer: ReturnType<typeof vi.fn>;
+}
+
+// SettingsConnectors captures `window.electronAPI` at module load (`isElectron`).
+const mcp = vi.hoisted(() => {
+  const api: McpTestApi = {
+    getServers: vi.fn(),
+    getPresets: vi.fn(),
+    getServerStatus: vi.fn(),
+    getTools: vi.fn(),
+    saveServer: vi.fn(),
+    deleteServer: vi.fn(),
+  };
+  const target = window as Window & { electronAPI?: { mcp: McpTestApi } };
+  target.electronAPI = { mcp: api };
+  return api;
+});
+
 const fixturesDir = path.resolve(process.cwd(), 'tests/fixtures');
 
 function loadFixture(name: string): unknown {
@@ -21,7 +50,50 @@ function connectorCardsFromIpcPayload(loaded: unknown) {
   return collectMcpConnectorRenderFields(normalizeMcpConfigInput(loaded).servers);
 }
 
+function ExplodingChild({ shouldThrow }: { shouldThrow: boolean }) {
+  if (shouldThrow) {
+    throw new Error('connectors render failed');
+  }
+  return createElement('div', null, 'connectors ok');
+}
+
+function RetryHarness() {
+  const [resetKey, setResetKey] = useState(0);
+  const [shouldThrow, setShouldThrow] = useState(true);
+  return createElement(
+    PanelErrorBoundary,
+    {
+      name: 'SettingsConnectors',
+      resetKey: `connectors:${resetKey}`,
+      fallback: createElement(
+        'button',
+        {
+          type: 'button',
+          onClick: () => {
+            setShouldThrow(false);
+            setResetKey((key) => key + 1);
+          },
+        },
+        'Retry'
+      ),
+    },
+    createElement(ExplodingChild, { shouldThrow })
+  );
+}
+
 describe('Settings MCP Connectors blank-page regression (#216)', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  beforeEach(() => {
+    mcp.getPresets.mockResolvedValue({});
+    mcp.getServerStatus.mockResolvedValue([]);
+    mcp.getTools.mockResolvedValue([]);
+    mcp.saveServer.mockResolvedValue({ success: true });
+    mcp.deleteServer.mockResolvedValue(undefined);
+  });
+
   it('turns malformed IPC / agent-installed payloads into renderable connector cards', () => {
     const tavilyDocument = loadFixture('mcp-config-agent-tavily.json');
     const mixedDocument = loadFixture('mcp-config-mixed-agent-installed.json');
@@ -65,46 +137,64 @@ describe('Settings MCP Connectors blank-page regression (#216)', () => {
     ).not.toThrow();
   });
 
-  it('shows the connectors fallback after a render error and recovers on Retry resetKey', () => {
-    const fallback = createElement('button', { type: 'button' }, 'Retry');
-    const children = createElement('div', null, 'connectors');
+  it('renders connector cards when IPC returns an agent-installed servers map', async () => {
+    mcp.getServers.mockResolvedValue(loadFixture('mcp-config-agent-tavily.json'));
 
-    expect(PanelErrorBoundary.getDerivedStateFromError()).toEqual({ hasError: true });
+    render(createElement(SettingsConnectors, { isActive: true }));
 
-    const recovered = PanelErrorBoundary.getDerivedStateFromProps(
-      {
-        name: 'SettingsConnectors',
-        fallback,
-        children,
-        resetKey: 'connectors:1',
-      },
-      { hasError: true, prevResetKey: 'connectors:0' }
-    );
-    expect(recovered).toEqual({ hasError: false, prevResetKey: 'connectors:1' });
-
-    const boundary = new PanelErrorBoundary({
-      name: 'SettingsConnectors',
-      fallback,
-      children,
-      resetKey: 'connectors:0',
-    });
-    boundary.state = { hasError: true, prevResetKey: 'connectors:0' };
-    expect(boundary.render()).toBe(fallback);
-
-    boundary.state = { hasError: false, prevResetKey: 'connectors:1' };
-    expect(boundary.render()).toBe(children);
+    expect(await screen.findByText('tavily-mcp')).toBeTruthy();
+    expect(screen.getByText('STDIO')).toBeTruthy();
+    expect(screen.getByText('npx -y tavily-mcp@latest')).toBeTruthy();
+    expect(screen.queryByText('No connectors configured')).toBeNull();
   });
 
-  it('keeps the MCP Connectors tab inside a retryable PanelErrorBoundary', () => {
-    const source = readFileSync(settingsPanelPath, 'utf8');
-    const tabStart = source.indexOf("activeTab === 'connectors'");
-    expect(tabStart).toBeGreaterThan(-1);
-    const connectorsBlock = source.slice(tabStart, tabStart + 1200);
-    expect(connectorsBlock).toMatch(
-      /<PanelErrorBoundary[\s\S]*name="SettingsConnectors"[\s\S]*onRetry[\s\S]*<SettingsConnectors/
-    );
-    expect(source).toMatch(
-      /function SettingsConnectorsFallback[\s\S]*onRetry[\s\S]*mcp\.pageErrorRetry/
-    );
+  it('renders connector cards when IPC returns servers as a JSON string', async () => {
+    const tavilyDocument = loadFixture('mcp-config-agent-tavily.json') as { servers: unknown };
+    mcp.getServers.mockResolvedValue({
+      servers: JSON.stringify(tavilyDocument.servers),
+    });
+
+    render(createElement(SettingsConnectors, { isActive: true }));
+
+    expect(await screen.findByText('tavily-mcp')).toBeTruthy();
+    expect(screen.getByText('npx -y tavily-mcp@latest')).toBeTruthy();
+  });
+
+  it('renders mixed agent-installed rows that used to crash type and args formatting', async () => {
+    mcp.getServers.mockResolvedValue(loadFixture('mcp-config-mixed-agent-installed.json'));
+
+    render(createElement(SettingsConnectors, { isActive: true }));
+
+    expect(await screen.findByText('Chrome')).toBeTruthy();
+    expect(screen.getByText('tavily-mcp')).toBeTruthy();
+    expect(screen.getAllByText('STDIO').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('npx -y tavily-mcp@latest')).toBeTruthy();
+  });
+
+  it('renders Claude mcpServers when the payload also has an empty servers array', async () => {
+    const document = loadFixture('mcp-config-claude-mcpServers.json') as Record<string, unknown>;
+    mcp.getServers.mockResolvedValue({ servers: [], ...document });
+
+    render(createElement(SettingsConnectors, { isActive: true }));
+
+    expect(await screen.findByText('tavily-mcp')).toBeTruthy();
+    expect(screen.getByText('tavily-remote')).toBeTruthy();
+    expect(screen.getByText('https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-test-key')).toBeTruthy();
+  });
+
+  it('shows the connectors fallback after a render error and recovers on Retry', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    render(createElement(RetryHarness));
+
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    expect(screen.queryByText('connectors ok')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(screen.getByText('connectors ok')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+
+    consoleError.mockRestore();
   });
 });
