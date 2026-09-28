@@ -49,6 +49,12 @@ export function Sidebar() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  useEffect(() => {
+    if (!exportError) return;
+    const timeout = window.setTimeout(() => setExportError(null), 5000);
+    return () => window.clearTimeout(timeout);
+  }, [exportError]);
+
   const normalizedQuery = useMemo(() => searchQuery.trim().toLowerCase(), [searchQuery]);
   const filteredSessions = useMemo(() => {
     return normalizedQuery

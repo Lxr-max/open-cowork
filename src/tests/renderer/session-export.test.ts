@@ -124,7 +124,9 @@ describe('SessionList export action', () => {
 
     expect(desktop).toContain('disabled=""');
     expect(desktop).toContain('title="sidebar.exportPending"');
+    expect(desktop).toContain('aria-label="sidebar.exportPending"');
     expect(browser).not.toContain('disabled=""');
+    expect(browser).toContain('aria-label="sidebar.exportSession"');
   });
 
   it('disables other export actions until the current export finishes', () => {

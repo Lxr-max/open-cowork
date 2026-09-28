@@ -94,7 +94,11 @@ export function SessionList({
                                 ? 'sidebar.exportPending'
                                 : 'sidebar.exportSession'
                             )}
-                            aria-label={t('sidebar.exportSession')}
+                            aria-label={t(
+                              isElectron && session.status === 'running'
+                                ? 'sidebar.exportPending'
+                                : 'sidebar.exportSession'
+                            )}
                           >
                             <Download className="w-3 h-3" />
                           </button>
