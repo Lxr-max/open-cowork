@@ -610,7 +610,10 @@
     "nSelected": "{{count}} selected",
     "batchDeleteConfirm": "Delete {{count}} conversations? This cannot be undone.",
     "cancel": "Cancel",
-    "confirmDelete": "Delete"
+    "confirmDelete": "Delete",
+    "exportSession": "Export conversation",
+    "exportFailed": "Could not export conversation. Please try again.",
+    "exportPending": "Wait until this conversation finishes before exporting."
   },
   "chat": {
     "sendMessage": "Send message",
