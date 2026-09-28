@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MessageMarkdown } from '../renderer/components/MessageMarkdown';
 import { CodeBlock } from '../renderer/components/message/CodeBlock';
 import { ContentBlockView } from '../renderer/components/message/ContentBlockView';
+import { MessageCard } from '../renderer/components/MessageCard';
 import {
   AUTO_TEXT_DIRECTION_PROPS,
   getTextAlignmentClass,
@@ -85,5 +86,27 @@ describe('automatic chat text direction', () => {
     );
     expect(markup).toContain('dir="ltr"');
     expect(markup).toContain('unicode-bidi:isolate');
+  });
+
+  it('keeps message controls in a separate hover group from code tools', () => {
+    const message = renderToStaticMarkup(
+      createElement(MessageCard, {
+        message: {
+          id: 'message-1',
+          sessionId: 'session-1',
+          role: 'user',
+          content: [{ type: 'text', text: 'Hello' }],
+          timestamp: 1,
+        },
+      })
+    );
+    const code = renderToStaticMarkup(
+      createElement(CodeBlock, { language: 'js', children: 'const n = 1;' })
+    );
+
+    expect(message).toContain('group/message');
+    expect(message).toContain('sm:group-hover/message:opacity-100');
+    expect(code).toContain('class="relative group my-3"');
+    expect(code).toContain('group-hover:opacity-100');
   });
 });

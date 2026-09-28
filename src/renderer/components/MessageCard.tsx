@@ -32,7 +32,7 @@ export const MessageCard = memo(function MessageCard({ message, isStreaming }: M
       title={t('messageCard.textDirection')}
       value={textDirection}
       onChange={(event) => setTextDirection(event.target.value as TextDirection)}
-      className="w-32 h-7 rounded border border-border bg-surface text-text-secondary text-xs px-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 transition-opacity"
+      className="w-32 h-7 rounded border border-border bg-surface text-text-secondary text-xs px-1 opacity-100 sm:opacity-0 sm:group-hover/message:opacity-100 focus:opacity-100 transition-opacity"
     >
       <option value="auto">{t('messageCard.directionAuto')}</option>
       <option value="ltr">{t('messageCard.directionLtr')}</option>
@@ -76,7 +76,7 @@ export const MessageCard = memo(function MessageCard({ message, isStreaming }: M
   };
 
   return (
-    <div className="animate-fade-in group">
+    <div className="animate-fade-in group/message">
       {isUser ? (
         // User message - compact styling with smaller padding and radius
         <div className="flex flex-col items-end gap-1">
@@ -117,7 +117,7 @@ export const MessageCard = memo(function MessageCard({ message, isStreaming }: M
             {directionSelect}
             <button
               onClick={handleCopy}
-              className="w-7 h-7 flex items-center justify-center rounded-md bg-surface-muted hover:bg-surface-active transition-all opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
+              className="w-7 h-7 flex items-center justify-center rounded-md bg-surface-muted hover:bg-surface-active transition-all opacity-100 sm:opacity-0 sm:group-hover/message:opacity-100 focus:opacity-100"
               title={t('messageCard.copyMessage')}
             >
               {copied ? (
