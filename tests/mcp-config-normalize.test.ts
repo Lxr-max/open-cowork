@@ -157,6 +157,13 @@ describe('MCP config normalization (issue #216)', () => {
     ]);
   });
 
+  it('does not mutate the document it normalizes', () => {
+    const document = loadFixture('mcp-config-mixed-agent-installed.json');
+    const before = JSON.stringify(document);
+    normalizeMcpConfigDocument(document);
+    expect(JSON.stringify(document)).toBe(before);
+  });
+
   it('leaves a canonical Open Cowork servers array unchanged', () => {
     const document = {
       servers: [

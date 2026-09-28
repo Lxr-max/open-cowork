@@ -4,7 +4,12 @@
  * Agent-installed connectors (Claude-style `mcpServers` maps, Tavily stdio
  * entries without `type`/`id`, string `args`, etc.) must never crash the
  * Settings → MCP Connectors tab.
+ *
+ * Normalization is an in-memory view. It does not write, and the save/delete
+ * helpers below only change the targeted entry inside the original collection
+ * (array, keyed object, JSON string, or `mcpServers` map).
  */
+import { isDeepStrictEqual } from 'node:util';
 import type { McpServerConfig, McpServerStatus, McpTool } from './ipc-types';
 
 export type McpTransportType = McpServerConfig['type'];
@@ -178,22 +183,150 @@ function normalizeEnabled(raw: unknown): { enabled: boolean; repaired: boolean }
   return { enabled: true, repaired: raw !== undefined };
 }
 
-function coerceServerEntries(value: unknown): Array<{ key?: string; entry: unknown }> | undefined {
-  if (value == null) {
-    return undefined;
-  }
-  const parsed = parseJsonIfString(value);
-  if (Array.isArray(parsed)) {
-    return parsed.map((entry) => ({ entry }));
-  }
-  if (isPlainObject(parsed)) {
-    return Object.entries(parsed).map(([key, entry]) => ({ key, entry }));
-  }
-  return undefined;
+const SERVERS_JSON_ERROR =
+  'MCP config `servers` is a string that is not valid JSON (expected an array or object).';
+const MCP_SERVERS_SHAPE_ERROR =
+  'MCP config `mcpServers` is not a valid server list or map (expected an object, array, or JSON string).';
+const SERVERS_TYPE_ERROR =
+  'MCP config `servers` has an unsupported type; expected an array, object, or JSON string.';
+const UNSUPPORTED_DOCUMENT_ERROR =
+  'MCP config document has an unsupported shape and was left unchanged.';
+
+type McpConfigFieldName = 'servers' | 'mcpServers' | 'mcp_servers';
+
+interface McpServerCollection {
+  field: McpConfigFieldName;
+  source: 'servers' | 'mcpServers';
+  jsonEncoded: boolean;
+  shape: 'array' | 'map';
+  entries: Array<{ key?: string; entry: unknown }>;
+  container: unknown[] | Record<string, unknown>;
+  collectionRepaired: boolean;
+}
+
+type ResolveMcpServerCollectionResult =
+  | { status: 'empty' }
+  | { status: 'unknown' }
+  | { status: 'invalid'; source: 'servers' | 'mcpServers'; error: string }
+  | { status: 'collection'; collection: McpServerCollection };
+
+const MANAGED_SERVER_KEYS: Array<keyof McpServerConfig> = [
+  'id',
+  'name',
+  'type',
+  'command',
+  'args',
+  'env',
+  'cwd',
+  'url',
+  'headers',
+  'enabled',
+];
+
+export interface McpConfigWriteResult {
+  ok: boolean;
+  changed: boolean;
+  field?: McpConfigFieldName;
+  value?: unknown;
+  error?: string;
 }
 
 function serversFieldNeedsRepair(value: unknown): boolean {
   return typeof value === 'string' || !Array.isArray(value);
+}
+
+function toServerCollection(
+  field: McpConfigFieldName,
+  value: unknown,
+  source: 'servers' | 'mcpServers'
+): McpServerCollection | undefined {
+  const parsed = parseJsonIfString(value);
+  if (Array.isArray(parsed)) {
+    return {
+      field,
+      source,
+      jsonEncoded: typeof value === 'string',
+      shape: 'array',
+      entries: parsed.map((entry) => ({ entry })),
+      container: parsed,
+      collectionRepaired: source === 'mcpServers' || serversFieldNeedsRepair(value),
+    };
+  }
+  if (isPlainObject(parsed)) {
+    return {
+      field,
+      source,
+      jsonEncoded: typeof value === 'string',
+      shape: 'map',
+      entries: Object.entries(parsed).map(([key, entry]) => ({ key, entry })),
+      container: parsed,
+      collectionRepaired: true,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Pick the same collection `normalizeMcpConfigDocument` shows in the UI.
+ * A non-empty `servers` value wins. An empty `servers` array (including one
+ * merged from store defaults) does not hide Claude-style `mcpServers`.
+ */
+function resolveMcpServerCollection(raw: unknown): ResolveMcpServerCollectionResult {
+  const parsed = parseJsonIfString(raw);
+  if (parsed == null) {
+    return { status: 'empty' };
+  }
+  if (Array.isArray(parsed)) {
+    const collection = toServerCollection('servers', parsed, 'servers');
+    return collection ? { status: 'collection', collection } : { status: 'unknown' };
+  }
+  if (!isPlainObject(parsed)) {
+    return { status: 'unknown' };
+  }
+
+  const serversField = parsed.servers;
+  const mcpServersField = parsed.mcpServers ?? parsed.mcp_servers;
+  const mcpFieldName: McpConfigFieldName | undefined =
+    parsed.mcpServers != null
+      ? 'mcpServers'
+      : parsed.mcp_servers != null
+        ? 'mcp_servers'
+        : undefined;
+  const serversCollection =
+    serversField !== undefined ? toServerCollection('servers', serversField, 'servers') : undefined;
+  const serversUnreadable = typeof serversField === 'string' && serversCollection === undefined;
+
+  if (serversCollection && serversCollection.entries.length > 0) {
+    return { status: 'collection', collection: serversCollection };
+  }
+
+  if (mcpServersField != null) {
+    const mcpCollection = mcpFieldName
+      ? toServerCollection(mcpFieldName, mcpServersField, 'mcpServers')
+      : undefined;
+    if (!mcpCollection) {
+      return {
+        status: 'invalid',
+        source: 'mcpServers',
+        error: serversUnreadable ? SERVERS_JSON_ERROR : MCP_SERVERS_SHAPE_ERROR,
+      };
+    }
+    return { status: 'collection', collection: mcpCollection };
+  }
+
+  if (serversUnreadable) {
+    return { status: 'invalid', source: 'servers', error: SERVERS_JSON_ERROR };
+  }
+
+  if (serversCollection) {
+    return { status: 'collection', collection: serversCollection };
+  }
+
+  if (serversField === undefined && mcpServersField === undefined) {
+    return { status: 'empty' };
+  }
+
+  return { status: 'invalid', source: 'servers', error: SERVERS_TYPE_ERROR };
 }
 
 export function normalizeMcpServerEntry(
@@ -309,78 +442,283 @@ function normalizeEntries(
 /**
  * Normalize a full `mcp-config.json` document, a `servers` array, or a Claude
  * Desktop `{ mcpServers: { ... } }` map into Open Cowork server configs.
+ *
+ * The result is only an in-memory view. Callers must not write it back over
+ * the original document.
  */
 export function normalizeMcpConfigDocument(raw: unknown): NormalizeMcpConfigResult {
-  const parsed = parseJsonIfString(raw);
-  if (parsed == null) {
+  const resolved = resolveMcpServerCollection(raw);
+  if (resolved.status === 'empty') {
     return { servers: [], repaired: false, source: 'empty', skipped: 0 };
   }
-
-  if (Array.isArray(parsed)) {
-    const entries = parsed.map((entry) => ({ entry }));
-    return normalizeEntries(entries, 'servers', false);
-  }
-
-  if (!isPlainObject(parsed)) {
+  if (resolved.status === 'unknown') {
     return { servers: [], repaired: true, source: 'unknown', skipped: 0 };
   }
-
-  const serversField = parsed.servers;
-  const mcpServersField = parsed.mcpServers ?? parsed.mcp_servers;
-  const serverEntries = coerceServerEntries(serversField);
-  const mcpEntries = coerceServerEntries(mcpServersField);
-  const serversUnreadable = typeof serversField === 'string' && serverEntries === undefined;
-  const mcpUnreadable = mcpServersField != null && mcpEntries === undefined;
-
-  // Prefer a non-empty `servers` list, including JSON strings and keyed maps.
-  // An empty array must not hide Claude-style `mcpServers` when electron-store
-  // merges `{ servers: [] }` defaults into an agent-installed document.
-  if (serverEntries !== undefined && serverEntries.length > 0) {
-    return normalizeEntries(serverEntries, 'servers', serversFieldNeedsRepair(serversField));
-  }
-
-  if (mcpServersField != null) {
-    if (mcpUnreadable) {
-      return {
-        servers: [],
-        repaired: true,
-        source: 'mcpServers',
-        skipped: 0,
-        error: serversUnreadable
-          ? 'MCP config `servers` is a string that is not valid JSON (expected an array or object).'
-          : 'MCP config `mcpServers` is not a valid server list or map (expected an object, array, or JSON string).',
-      };
-    }
-    return normalizeEntries(mcpEntries ?? [], 'mcpServers', true);
-  }
-
-  if (serversUnreadable) {
+  if (resolved.status === 'invalid') {
     return {
       servers: [],
       repaired: true,
-      source: 'servers',
+      source: resolved.source,
       skipped: 0,
-      error:
-        'MCP config `servers` is a string that is not valid JSON (expected an array or object).',
+      error: resolved.error,
+    };
+  }
+  return normalizeEntries(
+    resolved.collection.entries,
+    resolved.collection.source,
+    resolved.collection.collectionRepaired
+  );
+}
+
+function cloneCollectionContainer(
+  collection: McpServerCollection
+): unknown[] | Record<string, unknown> {
+  if (collection.shape === 'array') {
+    return [...(collection.container as unknown[])];
+  }
+  return { ...(collection.container as Record<string, unknown>) };
+}
+
+function encodeCollectionContainer(
+  collection: McpServerCollection,
+  container: unknown[] | Record<string, unknown>
+): unknown {
+  return collection.jsonEncoded ? JSON.stringify(container) : container;
+}
+
+function withUpdatedField(raw: unknown, field: McpConfigFieldName, value: unknown): unknown {
+  if (Array.isArray(raw)) {
+    return value;
+  }
+  if (!isPlainObject(raw)) {
+    return { [field]: value };
+  }
+  return { ...raw, [field]: value };
+}
+
+function findStoredServerEntry(
+  collection: McpServerCollection,
+  serverId: string
+): { index: number; key?: string; entry: unknown; normalized: McpServerConfig } | undefined {
+  const usedIds = new Set<string>();
+  for (let index = 0; index < collection.entries.length; index += 1) {
+    const item = collection.entries[index];
+    const normalized = normalizeMcpServerEntry(item.entry, item.key, usedIds);
+    if (normalized.server?.id === serverId) {
+      return {
+        index,
+        key: item.key,
+        entry: item.entry,
+        normalized: normalized.server,
+      };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Apply only the fields that differ from the normalized view, so a save does
+ * not rewrite Claude-only fields (`type: "http"`, string `args`, omitted
+ * `enabled`) when the user did not change them. The stable id is written once
+ * the entry is actually edited, so the next read still addresses that entry.
+ */
+function patchStoredServerEntry(
+  rawEntry: unknown,
+  normalized: McpServerConfig,
+  saved: McpServerConfig
+): { entry: Record<string, unknown>; changed: boolean } {
+  const base: Record<string, unknown> = isPlainObject(rawEntry) ? { ...rawEntry } : {};
+  let changed = false;
+  for (const key of MANAGED_SERVER_KEYS) {
+    const nextValue = saved[key];
+    if (isDeepStrictEqual(nextValue, normalized[key])) {
+      continue;
+    }
+    changed = true;
+    if (nextValue === undefined) {
+      delete base[key];
+    } else {
+      base[key] = nextValue;
+    }
+  }
+  if (changed && base.id !== saved.id) {
+    base.id = saved.id;
+  }
+  return { entry: base, changed };
+}
+
+function allocateMapKey(entries: Array<{ key?: string }>, server: McpServerConfig): string {
+  const used = new Set(entries.flatMap((entry) => (entry.key ? [entry.key] : [])));
+  const preferred = server.name.trim() || server.id;
+  if (!used.has(preferred)) {
+    return preferred;
+  }
+  if (!used.has(server.id)) {
+    return server.id;
+  }
+  let suffix = 2;
+  let candidate = `${preferred}-${suffix}`;
+  while (used.has(candidate)) {
+    suffix += 1;
+    candidate = `${preferred}-${suffix}`;
+  }
+  return candidate;
+}
+
+function blockedWrite(resolved: ResolveMcpServerCollectionResult): McpConfigWriteResult {
+  if (resolved.status === 'invalid') {
+    return { ok: false, changed: false, error: resolved.error };
+  }
+  return { ok: false, changed: false, error: UNSUPPORTED_DOCUMENT_ERROR };
+}
+
+function putEntry(
+  collection: McpServerCollection,
+  container: unknown[] | Record<string, unknown>,
+  index: number,
+  key: string | undefined,
+  entry: unknown
+): void {
+  if (collection.shape === 'array') {
+    (container as unknown[])[index] = entry;
+    return;
+  }
+  if (key) {
+    (container as Record<string, unknown>)[key] = entry;
+  }
+}
+
+function removeEntry(
+  collection: McpServerCollection,
+  container: unknown[] | Record<string, unknown>,
+  index: number,
+  key: string | undefined
+): void {
+  if (collection.shape === 'array') {
+    (container as unknown[]).splice(index, 1);
+    return;
+  }
+  if (key) {
+    delete (container as Record<string, unknown>)[key];
+  }
+}
+
+/**
+ * Insert or update one server inside the original document shape.
+ * Unrecognized siblings and every other entry stay as they were.
+ */
+export function upsertServerInMcpDocument(
+  raw: unknown,
+  server: McpServerConfig
+): McpConfigWriteResult {
+  const resolved = resolveMcpServerCollection(raw);
+  if (resolved.status === 'empty') {
+    return { ok: true, changed: true, field: 'servers', value: [server] };
+  }
+  if (resolved.status !== 'collection') {
+    return blockedWrite(resolved);
+  }
+
+  const collection = resolved.collection;
+  const match = findStoredServerEntry(collection, server.id);
+  const container = cloneCollectionContainer(collection);
+  if (!match) {
+    if (collection.shape === 'array') {
+      (container as unknown[]).push(server);
+    } else {
+      (container as Record<string, unknown>)[allocateMapKey(collection.entries, server)] = server;
+    }
+    return {
+      ok: true,
+      changed: true,
+      field: collection.field,
+      value: encodeCollectionContainer(collection, container),
     };
   }
 
-  if (serverEntries !== undefined) {
-    return normalizeEntries(serverEntries, 'servers', serversFieldNeedsRepair(serversField));
+  const patched = patchStoredServerEntry(match.entry, match.normalized, server);
+  if (!patched.changed) {
+    return { ok: true, changed: false };
   }
-
-  if (serversField === undefined && mcpServersField === undefined) {
-    return { servers: [], repaired: false, source: 'empty', skipped: 0 };
-  }
-
+  putEntry(collection, container, match.index, match.key, patched.entry);
   return {
-    servers: [],
-    repaired: true,
-    source: 'servers',
-    skipped: 0,
-    error:
-      'MCP config `servers` has an unsupported type; expected an array, object, or JSON string.',
+    ok: true,
+    changed: true,
+    field: collection.field,
+    value: encodeCollectionContainer(collection, container),
   };
+}
+
+/** Remove one recognized server. Unrecognized siblings stay in place. */
+export function deleteServerFromMcpDocument(raw: unknown, serverId: string): McpConfigWriteResult {
+  const resolved = resolveMcpServerCollection(raw);
+  if (resolved.status === 'empty') {
+    return { ok: true, changed: false };
+  }
+  if (resolved.status !== 'collection') {
+    return blockedWrite(resolved);
+  }
+
+  const collection = resolved.collection;
+  const match = findStoredServerEntry(collection, serverId);
+  if (!match) {
+    return { ok: true, changed: false };
+  }
+  const container = cloneCollectionContainer(collection);
+  removeEntry(collection, container, match.index, match.key);
+  return {
+    ok: true,
+    changed: true,
+    field: collection.field,
+    value: encodeCollectionContainer(collection, container),
+  };
+}
+
+/**
+ * Replace the recognized server list without flattening the document or
+ * dropping unrecognized entries.
+ */
+export function replaceRecognizedServersInMcpDocument(
+  raw: unknown,
+  servers: McpServerConfig[]
+): McpConfigWriteResult {
+  const recognized = normalizeMcpConfigDocument(raw);
+  if (recognized.error) {
+    return { ok: false, changed: false, error: recognized.error };
+  }
+
+  const nextIds = new Set(servers.map((server) => server.id));
+  let current = raw;
+  let last: McpConfigWriteResult = { ok: true, changed: false };
+
+  for (const existing of recognized.servers) {
+    if (nextIds.has(existing.id)) {
+      continue;
+    }
+    const deleted = deleteServerFromMcpDocument(current, existing.id);
+    if (!deleted.ok || !deleted.changed || !deleted.field) {
+      if (!deleted.ok) {
+        return deleted;
+      }
+      continue;
+    }
+    current = withUpdatedField(current, deleted.field, deleted.value);
+    last = deleted;
+  }
+
+  for (const server of servers) {
+    const upserted = upsertServerInMcpDocument(current, server);
+    if (!upserted.ok) {
+      return upserted;
+    }
+    if (!upserted.changed || !upserted.field) {
+      continue;
+    }
+    current = withUpdatedField(current, upserted.field, upserted.value);
+    last = upserted;
+  }
+
+  return last;
 }
 
 /** Normalize whatever the MCP settings IPC / store might return. */

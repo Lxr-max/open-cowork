@@ -6,10 +6,13 @@ import path from 'path';
 import type { MCPServerConfig } from './mcp-manager';
 import { log, logError } from '../utils/logger';
 import {
+  deleteServerFromMcpDocument,
   normalizeMcpConfigDocument,
   normalizeMcpConfigInput,
   normalizeMcpServerEntry,
-  type NormalizeMcpConfigResult,
+  replaceRecognizedServersInMcpDocument,
+  upsertServerInMcpDocument,
+  type McpConfigWriteResult,
 } from '../../shared/mcp-config';
 
 /**
@@ -72,10 +75,15 @@ export const MCP_SERVER_PRESETS: Record<
 
 /**
  * MCP Server Configuration Store
+ *
+ * `servers` is optional on purpose. electron-store writes `defaults` into the
+ * JSON file when the store is constructed, so a default `servers: []` would
+ * rewrite Claude-style documents at startup.
  */
 type McpConfigStoreShape = {
-  servers: MCPServerConfig[];
+  servers?: unknown;
   mcpServers?: unknown;
+  mcp_servers?: unknown;
 };
 
 class MCPConfigStore {
@@ -85,9 +93,6 @@ class MCPConfigStore {
     const storeOptions: StoreOptions<McpConfigStoreShape> & { projectName?: string } = {
       name: 'mcp-config',
       projectName: 'open-cowork',
-      defaults: {
-        servers: [],
-      },
     };
 
     this.store = new Store<McpConfigStoreShape>(storeOptions);
@@ -96,9 +101,9 @@ class MCPConfigStore {
   /**
    * Get all MCP server configurations.
    *
-   * Agent-installed or Claude-style documents (object maps, missing `type`/`id`)
-   * are normalized to the Open Cowork array shape so callers never receive a
-   * non-array or crash the settings UI.
+   * Agent-installed or Claude-style documents are normalized in memory so
+   * callers never receive a non-array. This method does not write. Unknown
+   * entries and the original document shape stay in the file.
    */
   getServers(): MCPServerConfig[] {
     try {
@@ -106,10 +111,6 @@ class MCPConfigStore {
       const normalized = normalizeMcpConfigDocument(document);
       if (normalized.error) {
         logError('[MCPConfigStore] MCP config could not be normalized:', normalized.error);
-      }
-      // Do not persist a failed parse — that would wipe agent-installed string configs.
-      if (normalized.repaired && !normalized.error) {
-        this.persistNormalizedServers(normalized);
       }
       return normalized.servers;
     } catch (error) {
@@ -131,20 +132,16 @@ class MCPConfigStore {
     }
   }
 
-  private persistNormalizedServers(result: NormalizeMcpConfigResult): void {
-    try {
-      log('[MCPConfigStore] Repairing malformed MCP config', {
-        source: result.source,
-        skipped: result.skipped,
-        count: result.servers.length,
-      });
-      this.store.set('servers', result.servers);
-      if (result.source === 'mcpServers') {
-        this.store.delete('mcpServers');
-      }
-    } catch (error) {
-      logError('[MCPConfigStore] Failed to persist repaired MCP config:', error);
+  private commitMcpConfigWrite(result: McpConfigWriteResult): void {
+    if (!result.ok) {
+      const message = result.error ?? 'MCP config was left unchanged.';
+      logError('[MCPConfigStore] Refusing to modify MCP config:', message);
+      throw new Error(message);
     }
+    if (!result.changed || result.field === undefined) {
+      return;
+    }
+    this.store.set(result.field, result.value);
   }
 
   /**
@@ -165,32 +162,29 @@ class MCPConfigStore {
       return;
     }
 
-    const servers = this.getServers();
-    const index = servers.findIndex((s) => s.id === server.id);
-
-    if (index >= 0) {
-      servers[index] = server;
-    } else {
-      servers.push(server);
-    }
-
-    this.store.set('servers', servers);
+    this.commitMcpConfigWrite(upsertServerInMcpDocument(this.readStoreDocument(), server));
   }
 
   /**
    * Delete a server configuration
    */
   deleteServer(serverId: string): void {
-    const servers = this.getServers();
-    const filtered = servers.filter((s) => s.id !== serverId);
-    this.store.set('servers', filtered);
+    this.commitMcpConfigWrite(deleteServerFromMcpDocument(this.readStoreDocument(), serverId));
   }
 
   /**
-   * Update all server configurations
+   * Replace recognized server configurations.
+   * Unrecognized entries and the original collection shape are kept.
    */
   setServers(servers: MCPServerConfig[]): void {
-    this.store.set('servers', normalizeMcpConfigInput(servers).servers);
+    const normalized = normalizeMcpConfigInput(servers);
+    if (normalized.error) {
+      this.commitMcpConfigWrite({ ok: false, changed: false, error: normalized.error });
+      return;
+    }
+    this.commitMcpConfigWrite(
+      replaceRecognizedServersInMcpDocument(this.readStoreDocument(), normalized.servers)
+    );
   }
 
   /**
