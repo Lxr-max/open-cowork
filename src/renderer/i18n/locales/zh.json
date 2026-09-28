@@ -610,7 +610,9 @@
     "nSelected": "已选 {{count}} 个",
     "batchDeleteConfirm": "删除 {{count}} 个对话？此操作无法撤销。",
     "cancel": "取消",
-    "confirmDelete": "删除"
+    "confirmDelete": "删除",
+    "exportSession": "导出对话",
+    "exportFailed": "导出对话失败，请重试。"
   },
   "chat": {
     "sendMessage": "发送消息",
