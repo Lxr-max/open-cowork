@@ -56,7 +56,10 @@ describe('automatic chat text direction', () => {
     );
 
     expect(auto).toContain('dir="auto"');
-    expect(auto.match(/<p>/g)).toHaveLength(2);
+    // Direction is applied to the markdown wrapper, not each paragraph.
+    // Count the opening tag boundary so a future attribute on <p>
+    // still counts that paragraph instead of dropping the match.
+    expect(auto.match(/<p\b/g)).toHaveLength(2);
     expect(rtl).toContain('dir="rtl"');
     expect(rtl).toContain('text-left');
     for (const paragraph of text.split('\n\n')) {
@@ -78,6 +81,22 @@ describe('automatic chat text direction', () => {
     expect(markup).toContain('dir="rtl"');
     expect(markup).toContain('text-left');
     expect(markup).toContain(text);
+  });
+
+  it('applies the selected direction to collapsed thinking text', () => {
+    const thinking = 'React هي مكتبة لبناء واجهات المستخدم.';
+    const markup = renderToStaticMarkup(
+      createElement(ContentBlockView, {
+        block: { type: 'thinking', thinking },
+        isUser: false,
+        textDirection: 'rtl',
+      })
+    );
+
+    expect(markup).toContain('dir="rtl"');
+    expect(markup).toContain('unicode-bidi:isolate');
+    expect(markup).toContain('text-left');
+    expect(markup).toContain(thinking);
   });
 
   it('keeps fenced code independently left-to-right', () => {
