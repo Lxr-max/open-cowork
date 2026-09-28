@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createElement } from 'react';
-import { renderToStaticMarkup } from 'react-dom/server';
+import { PassThrough } from 'node:stream';
+import { createElement, type ReactElement } from 'react';
+import { renderToPipeableStream, renderToStaticMarkup } from 'react-dom/server';
 import { MessageMarkdown } from '../renderer/components/MessageMarkdown';
 import { CodeBlock } from '../renderer/components/message/CodeBlock';
 import { ContentBlockView } from '../renderer/components/message/ContentBlockView';
@@ -10,6 +11,24 @@ import {
   getTextAlignmentClass,
   getTextDirectionProps,
 } from '../renderer/utils/text-direction';
+
+function renderDeferredMarkup(element: ReactElement): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const sink = new PassThrough();
+    const chunks: Buffer[] = [];
+    sink.on('data', (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)));
+    sink.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    sink.on('error', reject);
+    const { pipe } = renderToPipeableStream(element, {
+      onAllReady() {
+        pipe(sink);
+      },
+      onError(error) {
+        reject(error);
+      },
+    });
+  });
+}
 
 describe('automatic chat text direction', () => {
   it('delegates direction detection to the browser for every text block', () => {
@@ -97,6 +116,30 @@ describe('automatic chat text direction', () => {
     expect(markup).toContain('unicode-bidi:isolate');
     expect(markup).toContain('text-left');
     expect(markup).toContain(thinking);
+  });
+
+  it('keeps manual RTL list markers beside the left-aligned text', async () => {
+    const text = '- Alpha item\n- مرحبا بالعالم';
+    const rtl = await renderDeferredMarkup(
+      createElement(ContentBlockView, {
+        block: { type: 'text', text },
+        isUser: false,
+        textDirection: 'rtl',
+      })
+    );
+    const auto = await renderDeferredMarkup(
+      createElement(ContentBlockView, {
+        block: { type: 'text', text },
+        isUser: false,
+      })
+    );
+
+    expect(rtl).toContain('<li dir="ltr" class="text-left"><span dir="rtl"');
+    expect(rtl).toContain('unicode-bidi:isolate');
+    expect(rtl).toContain('Alpha item');
+    expect(rtl).toContain('مرحبا بالعالم');
+    expect(auto).toContain('<li dir="auto"');
+    expect(auto).not.toContain('<li dir="ltr"');
   });
 
   it('keeps fenced code independently left-to-right', () => {

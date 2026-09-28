@@ -217,9 +217,21 @@ export const ContentBlockView = memo(function ContentBlockView({
         );
       },
       li({ children }: { children?: React.ReactNode }) {
+        const content = renderChildrenWithFileLinks(children, 'li');
+        // The marker follows the list item's own direction. Manual RTL would
+        // place an outside marker on the right while text-left keeps the words
+        // on the left, so the marker stays LTR and the item text carries the
+        // selected direction.
+        if (textDirection === 'auto') {
+          return (
+            <li {...directionProps} className={alignmentClass}>
+              {content}
+            </li>
+          );
+        }
         return (
-          <li {...directionProps} className={alignmentClass}>
-            {renderChildrenWithFileLinks(children, 'li')}
+          <li dir="ltr" className={alignmentClass}>
+            <span {...directionProps}>{content}</span>
           </li>
         );
       },
