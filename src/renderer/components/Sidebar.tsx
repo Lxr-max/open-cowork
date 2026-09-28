@@ -15,7 +15,7 @@ import {
   ListChecks,
 } from 'lucide-react';
 import type { Session } from '../types';
-import { createSessionExport } from '../utils/session-export';
+import { createSessionExport, getSessionExportMessages } from '../utils/session-export';
 import { SessionList } from './SessionList';
 
 import sidebarLogoSrc from '../assets/logo.png';
@@ -41,7 +41,9 @@ export function Sidebar() {
     isElectron,
   } = useIPC();
   const [searchQuery, setSearchQuery] = useState('');
-  const [exportError, setExportError] = useState(false);
+  const [exportError, setExportError] = useState<
+    'sidebar.exportFailed' | 'sidebar.exportPending' | null
+  >(null);
   const [exportingSessionId, setExportingSessionId] = useState<string | null>(null);
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -199,12 +201,14 @@ export function Sidebar() {
 
   const handleExportSession = async (e: React.MouseEvent, session: Session) => {
     e.stopPropagation();
-    setExportError(false);
+    setExportError(null);
     setExportingSessionId(session.id);
     try {
-      const messages = isElectron
-        ? await getSessionMessages(session.id)
-        : (useAppStore.getState().sessionStates[session.id]?.messages ?? []);
+      const messages = await getSessionExportMessages(session.id, isElectron, getSessionMessages);
+      if (messages === null) {
+        setExportError('sidebar.exportPending');
+        return;
+      }
       const { blob, filename } = createSessionExport(session, messages);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -216,7 +220,7 @@ export function Sidebar() {
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       console.error('[Sidebar] Failed to export session:', error);
-      setExportError(true);
+      setExportError('sidebar.exportFailed');
     } finally {
       setExportingSessionId(null);
     }
@@ -362,6 +366,7 @@ export function Sidebar() {
         selectedIds={selectedIds}
         isSelectMode={isSelectMode}
         exportingSessionId={exportingSessionId}
+        isElectron={isElectron}
         onSessionClick={(sessionId) => {
           if (isSelectMode) toggleSelectSession(sessionId);
           else void handleSessionClick(sessionId);
@@ -372,7 +377,7 @@ export function Sidebar() {
 
       {exportError && (
         <p role="alert" className="px-4 pb-2 text-xs text-error">
-          {t('sidebar.exportFailed')}
+          {t(exportError)}
         </p>
       )}
 

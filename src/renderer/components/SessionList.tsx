@@ -9,6 +9,7 @@ type Props = {
   selectedIds: Set<string>;
   isSelectMode: boolean;
   exportingSessionId: string | null;
+  isElectron: boolean;
   onSessionClick: (sessionId: string) => void;
   onExport: (event: MouseEvent, session: Session) => void;
   onDelete: (event: MouseEvent, sessionId: string) => void;
@@ -22,6 +23,7 @@ export function SessionList({
   selectedIds,
   isSelectMode,
   exportingSessionId,
+  isElectron,
   onSessionClick,
   onExport,
   onDelete,
@@ -82,9 +84,16 @@ export function SessionList({
                         <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
                           <button
                             onClick={(event) => onExport(event, session)}
-                            disabled={exportingSessionId === session.id}
+                            disabled={
+                              exportingSessionId !== null ||
+                              (isElectron && session.status === 'running')
+                            }
                             className="w-6 h-6 rounded-lg flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-surface-active transition-colors disabled:opacity-40"
-                            title={t('sidebar.exportSession')}
+                            title={t(
+                              isElectron && session.status === 'running'
+                                ? 'sidebar.exportPending'
+                                : 'sidebar.exportSession'
+                            )}
                             aria-label={t('sidebar.exportSession')}
                           >
                             <Download className="w-3 h-3" />

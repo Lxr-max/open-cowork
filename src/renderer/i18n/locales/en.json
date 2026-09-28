@@ -612,7 +612,8 @@
     "cancel": "Cancel",
     "confirmDelete": "Delete",
     "exportSession": "Export conversation",
-    "exportFailed": "Could not export conversation. Please try again."
+    "exportFailed": "Could not export conversation. Please try again.",
+    "exportPending": "Wait until this conversation finishes before exporting."
   },
   "chat": {
     "sendMessage": "Send message",
