@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   annotateImageReadResult,
-  consumeImageResizeErrors,
+  collectImageResizeErrors,
   formatImageResizeFailure,
   installPackagedImageWorkerResolver,
   reportImageResizeError,
@@ -149,8 +149,6 @@ describe('image resize failure reporting', () => {
       'could not be resized below the inline image size limit'
     );
     expect(result.content[0].text).toContain('Image resize error: ERR_DLOPEN_FAILED: sharp.node');
-    expect(consumeImageResizeErrors()).toEqual([]);
-
     const bashResult = await tools[1].execute('call-2', {}, undefined, undefined, {});
     expect(bashResult).toEqual({ content: [{ type: 'text', text: 'ok' }] });
   });
@@ -209,6 +207,95 @@ describe('image resize failure reporting', () => {
   });
 });
 
+describe('per-call image resize error collection', () => {
+  const FAILURE_TEXT = '[Image omitted: could not be resized below the inline image size limit.]';
+
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it('attaches each error to the concurrent read that reported it', async () => {
+    const firstMayReport = deferred();
+    const secondReported = deferred();
+    const tools = wrapReadToolForImageResizeErrors([
+      {
+        name: 'read',
+        async execute(
+          _toolCallId: string,
+          params: unknown,
+          _signal: AbortSignal | undefined,
+          _onUpdate: unknown,
+          _ctx: unknown
+        ) {
+          const file = (params as { path: string }).path;
+          if (file === 'a.jpg') {
+            await firstMayReport.promise;
+            reportImageResizeError(new Error('error from a.jpg'));
+          } else {
+            reportImageResizeError(new Error('error from b.jpg'));
+            secondReported.resolve();
+            await new Promise((r) => setTimeout(r, 5));
+          }
+          return { content: [{ type: 'text', text: `${file}\n${FAILURE_TEXT}` }] };
+        },
+      },
+    ]);
+
+    const first = tools[0].execute('call-a', { path: 'a.jpg' }, undefined, undefined, {});
+    const second = tools[0].execute('call-b', { path: 'b.jpg' }, undefined, undefined, {});
+    await secondReported.promise;
+    firstMayReport.resolve();
+
+    const [a, b] = (await Promise.all([first, second])) as Array<{
+      content: Array<{ text: string }>;
+    }>;
+    expect(a.content[0].text).toContain('Image resize error: error from a.jpg');
+    expect(a.content[0].text).not.toContain('b.jpg');
+    expect(b.content[0].text).toContain('Image resize error: error from b.jpg');
+    expect(b.content[0].text).not.toContain('a.jpg');
+  });
+
+  it('does not carry an error reported outside a read into the next read', async () => {
+    reportImageResizeError(new Error('stray error'));
+    const tools = wrapReadToolForImageResizeErrors([
+      {
+        name: 'read',
+        async execute(
+          _toolCallId: string,
+          _params: unknown,
+          _signal: AbortSignal | undefined,
+          _onUpdate: unknown,
+          _ctx: unknown
+        ) {
+          return { content: [{ type: 'text', text: FAILURE_TEXT }] };
+        },
+      },
+    ]);
+    const result = (await tools[0].execute('call', {}, undefined, undefined, {})) as {
+      content: Array<{ text: string }>;
+    };
+    expect(result.content[0].text).toBe(FAILURE_TEXT);
+  });
+
+  it('collects errors only inside its own scope', async () => {
+    const outer = collectImageResizeErrors(async () => {
+      const inner = collectImageResizeErrors(() => {
+        reportImageResizeError(new Error('inner'));
+      });
+      await Promise.resolve();
+      reportImageResizeError(new Error('outer'));
+      return inner.errors;
+    });
+    const innerErrors = await outer.result;
+    expect(innerErrors.map((e) => (e as Error).message)).toEqual(['inner']);
+    expect(outer.errors.map((e) => (e as Error).message)).toEqual(['outer']);
+  });
+});
+
 describe('installPackagedImageWorkerResolver', () => {
   it('loads the unpacked worker script and records worker failures', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'image-resize-install-'));
@@ -238,20 +325,26 @@ describe('installPackagedImageWorkerResolver', () => {
     const workerThreads = { Worker: FakeWorker };
     installPackagedImageWorkerResolver(workerThreads);
 
-    const worker = new workerThreads.Worker(pathToFileURL(packedPath));
+    const owner = collectImageResizeErrors(
+      () => new workerThreads.Worker(pathToFileURL(packedPath))
+    );
+    const worker = owner.result;
     expect(fileURLToPath(worker.specifier)).toBe(unpackedPath);
 
-    worker.once('error', () => undefined);
-    worker.events.error(new Error('Cannot find module'));
-    expect(consumeImageResizeErrors().map((error) => (error as Error).message)).toEqual([
-      'Cannot find module',
-    ]);
+    // Events fire after the creating call returned and while another call is
+    // active; they still belong to the call that created the worker.
+    const other = collectImageResizeErrors(() => {
+      worker.once('error', () => undefined);
+      worker.events.error(new Error('Cannot find module'));
+      worker.once('message', () => undefined);
+      worker.events.message({ error: 'Failed to load @silvia-odwyer/photon-node' });
+    });
 
-    worker.once('message', () => undefined);
-    worker.events.message({ error: 'Failed to load @silvia-odwyer/photon-node' });
-    expect(consumeImageResizeErrors().map((error) => (error as Error).message)).toEqual([
+    expect(owner.errors.map((error) => (error as Error).message)).toEqual([
+      'Cannot find module',
       'Failed to load @silvia-odwyer/photon-node',
     ]);
+    expect(other.errors).toEqual([]);
 
     fs.rmSync(root, { recursive: true, force: true });
   });

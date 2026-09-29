@@ -13,12 +13,14 @@
 const fs = require('fs');
 const path = require('path');
 const { createRequire } = require('module');
+const { AsyncLocalStorage } = require('async_hooks');
 const { fileURLToPath, pathToFileURL } = require('url');
 
 const ASAR_SEGMENT = /app\.asar(?=\/|\\|$)/g;
 const IMAGE_RESIZE_FAILURE_TEXT =
   /could not be resized below the inline image size limit|could not be converted to a supported inline image format/i;
 const PATCHED_WORKER = '__openCoworkImageResizePatched';
+const ERROR_SCOPE_KEY = '__openCoworkImageResizeErrorScope';
 
 function rewriteAppAsarToUnpacked(filePath) {
   if (typeof filePath !== 'string' || filePath.length === 0) return filePath;
@@ -61,7 +63,10 @@ function resolvePackagedWorkerSpecifier(specifier, fileExists) {
   const unpackedPath = rewriteAppAsarToUnpacked(originalPath);
   if (unpackedPath === originalPath || !exists(unpackedPath)) return specifier;
 
-  if (specifier instanceof URL || (typeof specifier === 'string' && specifier.startsWith('file:'))) {
+  if (
+    specifier instanceof URL ||
+    (typeof specifier === 'string' && specifier.startsWith('file:'))
+  ) {
     return pathToFileURL(unpackedPath);
   }
   return unpackedPath;
@@ -102,11 +107,29 @@ function loadPhotonForPackagedApp() {
     : new Error('Unable to resolve @silvia-odwyer/photon-node');
 }
 
-function getPendingImageResizeErrors() {
-  if (!Array.isArray(globalThis.__openCoworkImageResizeErrors)) {
-    globalThis.__openCoworkImageResizeErrors = [];
+// Errors are collected per read call. The main bundle and the banner can each
+// load a copy of this file, so both share one AsyncLocalStorage on globalThis.
+function getImageResizeErrorScope() {
+  if (!(globalThis[ERROR_SCOPE_KEY] instanceof AsyncLocalStorage)) {
+    globalThis[ERROR_SCOPE_KEY] = new AsyncLocalStorage();
   }
-  return globalThis.__openCoworkImageResizeErrors;
+  return globalThis[ERROR_SCOPE_KEY];
+}
+
+function recordImageResizeError(error) {
+  const errors = getImageResizeErrorScope().getStore();
+  if (Array.isArray(errors)) errors.push(error);
+}
+
+/**
+ * Run `fn` with its own error list. Errors reported from `fn`'s async context
+ * (including workers it creates) go to this list only, so concurrent reads
+ * cannot pick up each other's errors.
+ */
+function collectImageResizeErrors(fn) {
+  const errors = [];
+  const result = getImageResizeErrorScope().run(errors, fn);
+  return { result, errors };
 }
 
 function errorMessage(error) {
@@ -125,12 +148,8 @@ function reportImageResizeError(error) {
     hook(error);
     return;
   }
-  getPendingImageResizeErrors().push(error);
+  recordImageResizeError(error);
   console.error('[ImageResize]', error);
-}
-
-function consumeImageResizeErrors() {
-  return getPendingImageResizeErrors().splice(0);
 }
 
 function formatImageResizeFailure(errors) {
@@ -174,6 +193,11 @@ function annotateImageReadResult(result, errors) {
 function tapImageResizeWorker(worker) {
   const original = worker.on;
   if (typeof original !== 'function' || original.__openCoworkImageResizeTapped) return;
+  // Bind worker failures to the read call that created the worker, not to
+  // whichever call is active when the event fires.
+  const scope = getImageResizeErrorScope();
+  const ownerErrors = scope.getStore();
+  const reportForOwner = (error) => scope.run(ownerErrors, () => reportImageResizeError(error));
 
   // EventEmitter#once delegates to this.on, so wrapping `on` covers once/addListener
   // without reporting the same failure twice.
@@ -181,14 +205,14 @@ function tapImageResizeWorker(worker) {
     if ((event === 'error' || event === 'message') && typeof listener === 'function') {
       const wrapped = (payload) => {
         if (event === 'error') {
-          reportImageResizeError(payload);
+          reportForOwner(payload);
         } else if (
           payload &&
           typeof payload === 'object' &&
           typeof payload.error === 'string' &&
           payload.error
         ) {
-          reportImageResizeError(new Error(payload.error));
+          reportForOwner(new Error(payload.error));
         }
         return listener(payload);
       };
@@ -226,7 +250,7 @@ function ensureImageResizeReporting(report) {
   if (globalThis.__openCoworkImageResizeReportingInstalled) return;
   globalThis.__openCoworkImageResizeReportingInstalled = true;
   globalThis.__openCoworkReportImageResizeError = (error) => {
-    getPendingImageResizeErrors().push(error);
+    recordImageResizeError(error);
     if (typeof report === 'function') report(error);
   };
   globalThis.__openCoworkLoadPhoton = () => loadPhotonForPackagedApp();
@@ -237,7 +261,7 @@ function resetImageResizeReportingState() {
   delete globalThis.__openCoworkImageResizeReportingInstalled;
   delete globalThis.__openCoworkReportImageResizeError;
   delete globalThis.__openCoworkLoadPhoton;
-  delete globalThis.__openCoworkImageResizeErrors;
+  delete globalThis[ERROR_SCOPE_KEY];
 }
 
 function wrapReadToolForImageResizeErrors(tools) {
@@ -248,12 +272,15 @@ function wrapReadToolForImageResizeErrors(tools) {
     return {
       ...tool,
       async execute(toolCallId, params, signal, onUpdate, ctx) {
-        consumeImageResizeErrors();
+        // The async wrapper turns a synchronous throw into a rejection handled below.
+        const { result: pending, errors } = collectImageResizeErrors(async () =>
+          originalExecute(toolCallId, params, signal, onUpdate, ctx)
+        );
         try {
-          const result = await originalExecute(toolCallId, params, signal, onUpdate, ctx);
-          return annotateImageReadResult(result, consumeImageResizeErrors());
+          const result = await pending;
+          return annotateImageReadResult(result, errors.slice());
         } catch (error) {
-          const extra = formatImageResizeFailure(consumeImageResizeErrors());
+          const extra = formatImageResizeFailure(errors.slice());
           if (extra && error instanceof Error && !error.message.includes(extra)) {
             error.message = `${error.message}\n${extra}`;
           }
@@ -267,7 +294,7 @@ function wrapReadToolForImageResizeErrors(tools) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     annotateImageReadResult,
-    consumeImageResizeErrors,
+    collectImageResizeErrors,
     ensureImageResizeReporting,
     formatImageResizeFailure,
     installPackagedImageWorkerResolver,

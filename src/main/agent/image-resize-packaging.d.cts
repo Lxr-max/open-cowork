@@ -18,7 +18,7 @@ export function formatImageResizeFailure(errors: readonly unknown[]): string;
 
 export function annotateImageReadResult<T>(result: T, errors: readonly unknown[]): T;
 
-export function consumeImageResizeErrors(): unknown[];
+export function collectImageResizeErrors<T>(fn: () => T): { result: T; errors: unknown[] };
 
 export function reportImageResizeError(error: unknown): void;
 

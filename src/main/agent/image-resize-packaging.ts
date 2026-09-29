@@ -1,6 +1,6 @@
 export {
   annotateImageReadResult,
-  consumeImageResizeErrors,
+  collectImageResizeErrors,
   ensureImageResizeReporting,
   formatImageResizeFailure,
   installPackagedImageWorkerResolver,
