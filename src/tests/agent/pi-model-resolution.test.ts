@@ -48,6 +48,33 @@ describe('pi model runtime overrides', () => {
     });
   });
 
+  it('omits strict mode when a non-OpenAI registry model is retargeted to a relay', () => {
+    const model = applyPiModelRuntimeOverrides(
+      {
+        ...openAIResponsesModel,
+        id: 'gemini-3.1-pro',
+        name: 'gemini-3.1-pro',
+        api: 'google-generative-ai',
+        provider: 'google',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+      },
+      {
+        configProvider: 'openai',
+        rawProvider: 'custom',
+        customProtocol: 'openai',
+        customBaseUrl: 'https://api.tokenmix.ai/v1',
+      }
+    );
+
+    expect(model.api).toBe('openai-completions');
+    expect(model.baseUrl).toBe('https://api.tokenmix.ai/v1');
+    expect(model.compat).toMatchObject({
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsStrictMode: false,
+    });
+  });
+
   it('does not set requiresThinkingInContent for DeepSeek V4 models on custom endpoints', () => {
     const model = applyPiModelRuntimeOverrides(
       {

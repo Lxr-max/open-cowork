@@ -75,9 +75,15 @@ function shouldDisableDeveloperRoleForEndpoint(
  * TokenMix, local Ollama, OpenRouter) gets the same compat overrides.
  * Those endpoints 400 on proprietary Chat Completions fields (`strict`
  * inside `function`, `store`, `developer` role). pi-ai omits `strict` when
- * `supportsStrictMode` is false. Omitting the field matches OpenAI's default
- * of non-strict tools, so providers that accept `strict` keep the same
- * behaviour as an explicit `strict: false`.
+ * `supportsStrictMode` is false, and omits `store` when `supportsStore` is
+ * false. Omitting `strict` matches OpenAI's non-strict tool default, so
+ * relays that accept the field keep working. Official OpenAI is left on the
+ * SDK default so a model that needs `strict: true` can still send it.
+ *
+ * Call this only after the outbound `api` is final. A registry model is
+ * often retargeted from Google or Anthropic onto `openai-completions` later
+ * in the same pass; applying the flags earlier leaves pi-ai's default
+ * `supportsStrictMode: true`, which emits `function.strict: false`.
  */
 function applyNonOfficialOpenAICompat(model: Model<Api>): Model<Api> {
   return {
@@ -361,9 +367,6 @@ export function applyPiModelRuntimeOverrides(
   if (effectiveProvider === 'openrouter' && nextModel.api !== 'openai-completions') {
     nextModel = { ...nextModel, api: 'openai-completions' } as typeof nextModel;
   }
-  if (shouldDisableDeveloperRoleForEndpoint(nextModel, options)) {
-    nextModel = applyNonOfficialOpenAICompat(nextModel);
-  }
 
   if (
     options.rawProvider === 'ollama' &&
@@ -395,6 +398,10 @@ export function applyPiModelRuntimeOverrides(
     if (nextModel.api !== targetApi && !shouldPreserveOpenAIResponsesApi(nextModel, options)) {
       nextModel = { ...nextModel, api: targetApi } as typeof nextModel;
     }
+  }
+
+  if (shouldDisableDeveloperRoleForEndpoint(nextModel, options)) {
+    nextModel = applyNonOfficialOpenAICompat(nextModel);
   }
 
   return nextModel;
