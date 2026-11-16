@@ -311,7 +311,7 @@ Skills are built-in workflows for specific tasks like generating PPTX, DOCX, PDF
 MCP (Model Context Protocol) lets AI connect to external tools and services. Open Cowork supports MCP connectors for browsers, Notion, and other desktop apps — extending the AI's capabilities beyond just file management and code.
 
 **How do I set up remote control via Feishu or Slack?**
-Open Cowork supports remote control through Feishu (Lark) and Slack integration, allowing you to send commands and receive results from collaboration platforms. Check the app settings for remote control configuration.
+Open Cowork supports remote control through Feishu (Lark) and Slack integration, allowing you to send commands and receive results from collaboration platforms. Check the app settings for remote control configuration. International Lark apps (`open.larksuite.com`) need the Lark preset; Feishu apps (`open.feishu.cn`) keep the default Feishu preset.
 
 **Is my data safe? Does Open Cowork send data to external servers?**
 Open Cowork runs locally on your machine. Your files stay in your workspace. The only external communication is with the AI model API you configure (e.g., Anthropic, OpenRouter). No data is sent to Open Cowork servers.

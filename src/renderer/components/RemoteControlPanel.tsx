@@ -28,6 +28,7 @@ import {
   FEISHU_WEBHOOK_ENCRYPT_KEY_REQUIRED,
   getFeishuWebhookConfigError,
 } from '../../shared/feishu-webhook-config';
+import { normalizeFeishuDomain, type FeishuDomain } from '../../shared/feishu-domain';
 
 const isElectron = typeof window !== 'undefined' && window.electronAPI !== undefined;
 
@@ -51,6 +52,7 @@ export function RemoteControlPanel({ isActive }: { isActive: boolean }) {
   const [feishuVerificationToken, setFeishuVerificationToken] = useState('');
   const [feishuEncryptKey, setFeishuEncryptKey] = useState('');
   const [feishuDmPolicy, setFeishuDmPolicy] = useState('pairing');
+  const [feishuDomain, setFeishuDomain] = useState<FeishuDomain>('feishu');
   const [gatewayPort, setGatewayPort] = useState(18789);
   const [defaultWorkingDirectory, setDefaultWorkingDirectory] = useState('');
   const [autoApproveSafeTools, setAutoApproveSafeTools] = useState(true);
@@ -107,6 +109,7 @@ export function RemoteControlPanel({ isActive }: { isActive: boolean }) {
           setFeishuVerificationToken(configResult.channels.feishu.verificationToken || '');
           setFeishuEncryptKey(configResult.channels.feishu.encryptKey || '');
           setFeishuDmPolicy(configResult.channels.feishu.dm?.policy || 'pairing');
+          setFeishuDomain(normalizeFeishuDomain(configResult.channels.feishu.domain));
           setUseLongConnection(configResult.channels.feishu.useWebSocket !== false);
         }
       }
@@ -165,6 +168,7 @@ export function RemoteControlPanel({ isActive }: { isActive: boolean }) {
             verificationToken: feishuVerificationToken.trim() || undefined,
             encryptKey: feishuEncryptKey.trim() || undefined,
             useWebSocket: useLongConnection,
+            domain: feishuDomain,
             dm: { policy: feishuDmPolicy as 'open' | 'pairing' | 'allowlist' },
           }
         : null;
@@ -340,9 +344,11 @@ export function RemoteControlPanel({ isActive }: { isActive: boolean }) {
             feishuAppId={feishuAppId}
             feishuAppSecret={feishuAppSecret}
             feishuDmPolicy={feishuDmPolicy}
+            feishuDomain={feishuDomain}
             onAppIdChange={setFeishuAppId}
             onAppSecretChange={setFeishuAppSecret}
             onDmPolicyChange={setFeishuDmPolicy}
+            onDomainChange={setFeishuDomain}
           />
         )}
         {activeStep === 'connection' && (

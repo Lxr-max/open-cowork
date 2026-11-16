@@ -3,7 +3,7 @@
  * 远程控制模块类型定义
  */
 
-// Types are defined locally in this file
+import type { FeishuDomain } from '../../shared/feishu-domain';
 
 // ============================================================================
 // Gateway Configuration
@@ -121,6 +121,12 @@ export interface FeishuChannelConfig {
 
   /** Use WebSocket mode instead of webhook (recommended for local dev) */
   useWebSocket?: boolean;
+
+  /**
+   * Open platform. `feishu` is China (`open.feishu.cn`). `lark` is
+   * international Lark Suite (`open.larksuite.com`). Omitted means Feishu.
+   */
+  domain?: FeishuDomain;
 
   /** Direct message policy */
   dm: {

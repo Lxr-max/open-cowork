@@ -16,6 +16,7 @@ import type {
   RemoteResponseContent,
 } from '../../types';
 import { AESCipher } from '@larksuiteoapi/node-sdk';
+import { getFeishuOpenPlatformOrigin } from '../../../../shared/feishu-domain';
 import { FeishuAPI } from './feishu-api';
 import { FeishuWSClient } from './feishu-ws-client';
 
@@ -33,7 +34,7 @@ export class FeishuChannel extends ChannelBase {
   constructor(config: FeishuChannelConfig) {
     super();
     this.config = config;
-    this.api = new FeishuAPI(config.appId, config.appSecret);
+    this.api = new FeishuAPI(config.appId, config.appSecret, config.domain);
   }
 
   /**
@@ -46,6 +47,7 @@ export class FeishuChannel extends ChannelBase {
     }
 
     this.logStatus('Starting channel...');
+    log('[Feishu] Open platform:', getFeishuOpenPlatformOrigin(this.config.domain));
 
     try {
       // Get access token
@@ -305,6 +307,7 @@ export class FeishuChannel extends ChannelBase {
     this.wsClient = new FeishuWSClient({
       appId: this.config.appId,
       appSecret: this.config.appSecret,
+      domain: this.config.domain,
       logLevel: 'info',
     });
 

@@ -28,6 +28,7 @@ import type {
 } from './types';
 import type { Message, ContentBlock, ServerEvent, Session } from '../../renderer/types/index';
 import { getFeishuWebhookConfigError } from '../../shared/feishu-webhook-config';
+import { normalizeFeishuDomain } from '../../shared/feishu-domain';
 
 // Agent executor interface - exported for use in main process
 export interface AgentExecutor {
@@ -364,6 +365,11 @@ export class RemoteManager extends EventEmitter {
    * Update feishu channel config
    */
   async updateFeishuConfig(config: FeishuChannelConfig): Promise<void> {
+    config = {
+      ...config,
+      domain: normalizeFeishuDomain(config.domain),
+    };
+
     const webhookConfigError = getFeishuWebhookConfigError(config);
     if (webhookConfigError) {
       throw new Error(webhookConfigError);

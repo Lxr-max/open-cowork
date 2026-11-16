@@ -6,10 +6,18 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
 import { EventEmitter } from 'events';
 import { log, logError, logWarn } from '../../../utils/logger';
+import { getFeishuOpenPlatformOrigin } from '../../../../shared/feishu-domain';
 
 export interface FeishuWSConfig {
   appId: string;
   appSecret: string;
+  /**
+   * `feishu` or `lark`. Unknown values stay on Feishu. The SDK receives the
+   * open-platform origin (`https://open.feishu.cn` or `https://open.larksuite.com`),
+   * not the `/open-apis` REST prefix — the SDK appends that itself, and the
+   * long connection uses `{origin}/callback/ws/endpoint`.
+   */
+  domain?: unknown;
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
 }
 
@@ -57,13 +65,14 @@ export class FeishuWSClient extends EventEmitter {
     this.stopped = false;
 
     const { appId, appSecret } = this.config;
+    const openPlatformOrigin = getFeishuOpenPlatformOrigin(this.config.domain);
 
     if (!appId || !appSecret) {
       this.starting = false;
       throw new Error('Feishu appId and appSecret are required');
     }
 
-    log('[FeishuWS] Starting long connection...');
+    log('[FeishuWS] Starting long connection...', openPlatformOrigin);
 
     try {
       // Close any lingering previous connection before creating a new one
@@ -72,6 +81,7 @@ export class FeishuWSClient extends EventEmitter {
       this.client = new Lark.Client({
         appId,
         appSecret,
+        domain: openPlatformOrigin,
         disableTokenCache: false,
       });
 
@@ -80,6 +90,7 @@ export class FeishuWSClient extends EventEmitter {
       this.wsClient = new Lark.WSClient({
         appId,
         appSecret,
+        domain: openPlatformOrigin,
         loggerLevel,
       });
 

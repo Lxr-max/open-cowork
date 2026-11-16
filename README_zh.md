@@ -302,7 +302,7 @@ Skills 是内置的工作流模板，用于完成特定任务，如生成 PPTX�
 MCP（Model Context Protocol，模型上下文协议）让 AI 能连接外部工具和服务。Open Cowork 支持 MCP 连接器，可对接浏览器、Notion 等桌面应用，将 AI 的能力扩展到文件管理和编程之外。
 
 **如何设置飞书或 Slack 远程控制？**
-Open Cowork 支持通过飞书和 Slack 进行远程控制，你可以在协作平台上发送指令并接收执行结果。请在应用设置中查看远程控制配置选项。
+Open Cowork 支持通过飞书和 Slack 进行远程控制，你可以在协作平台上发送指令并接收执行结果。请在应用设置中查看远程控制配置选项。国际版 Lark 应用（`open.larksuite.com`）需要选择 Lark；飞书应用（`open.feishu.cn`）保持默认的飞书即可。
 
 **数据安全吗？会不会把数据发送到外部服务器？**
 Open Cowork 完全在本地运行，你的文件保留在你的工作区内。唯一的外部通信是与你配置的 AI 模型 API（如 Anthropic、OpenRouter）之间的交互。没有任何数据被发送到 Open Cowork 的服务器。

@@ -4,25 +4,48 @@
 
 import { useTranslation } from 'react-i18next';
 import { ExternalLink } from 'lucide-react';
+import {
+  getFeishuConsoleUrl,
+  normalizeFeishuDomain,
+  type FeishuDomain,
+} from '../../../shared/feishu-domain';
 
 interface Props {
   feishuAppId: string;
   feishuAppSecret: string;
   feishuDmPolicy: string;
+  feishuDomain: FeishuDomain;
   onAppIdChange: (value: string) => void;
   onAppSecretChange: (value: string) => void;
   onDmPolicyChange: (value: string) => void;
+  onDomainChange: (value: FeishuDomain) => void;
 }
 
 export function FeishuConfigStep({
   feishuAppId,
   feishuAppSecret,
   feishuDmPolicy,
+  feishuDomain,
   onAppIdChange,
   onAppSecretChange,
   onDmPolicyChange,
+  onDomainChange,
 }: Props) {
   const { t } = useTranslation();
+  const domain = normalizeFeishuDomain(feishuDomain);
+
+  const platforms: Array<{ value: FeishuDomain; label: string; desc: string }> = [
+    {
+      value: 'feishu',
+      label: t('remote.feishuPlatformFeishu'),
+      desc: t('remote.feishuPlatformFeishuDesc'),
+    },
+    {
+      value: 'lark',
+      label: t('remote.feishuPlatformLark'),
+      desc: t('remote.feishuPlatformLarkDesc'),
+    },
+  ];
 
   const dmPolicies = [
     {
@@ -50,6 +73,30 @@ export function FeishuConfigStep({
       </div>
 
       <div className="grid gap-4">
+        <div>
+          <label className="block text-sm font-medium text-text-secondary mb-2">
+            {t('remote.feishuPlatform')}
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            {platforms.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={domain === option.value}
+                onClick={() => onDomainChange(option.value)}
+                className={`p-3 rounded-xl border-2 text-left transition-all ${
+                  domain === option.value
+                    ? 'border-accent bg-accent/5'
+                    : 'border-border hover:border-accent/50'
+                }`}
+              >
+                <div className="font-medium text-text-primary text-sm">{option.label}</div>
+                <div className="text-xs text-text-muted mt-0.5">{option.desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div>
           <label className="block text-sm font-medium text-text-secondary mb-2">App ID</label>
           <input
@@ -96,13 +143,13 @@ export function FeishuConfigStep({
       </div>
 
       <a
-        href="https://open.feishu.cn/app"
+        href={getFeishuConsoleUrl(domain)}
         target="_blank"
         rel="noopener noreferrer"
         className="inline-flex items-center gap-2 text-sm text-accent hover:underline"
       >
         <ExternalLink className="w-4 h-4" />
-        {t('remote.openFeishu')}
+        {domain === 'lark' ? t('remote.openLark') : t('remote.openFeishu')}
       </a>
     </div>
   );

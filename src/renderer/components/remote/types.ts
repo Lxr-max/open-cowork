@@ -2,6 +2,8 @@
  * Shared types for RemoteControlPanel sub-components
  */
 
+import type { FeishuDomain } from '../../../shared/feishu-domain';
+
 export interface GatewayStatus {
   running: boolean;
   port?: number;
@@ -56,6 +58,7 @@ export interface RemoteConfig {
       verificationToken?: string;
       encryptKey?: string;
       useWebSocket?: boolean;
+      domain?: FeishuDomain;
       dm: {
         policy: string;
       };

@@ -8,6 +8,8 @@
  *    the originating module lives in `main/` (not importable from renderer/preload).
  */
 
+import type { FeishuDomain } from './feishu-domain';
+
 // ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
@@ -75,6 +77,8 @@ export interface FeishuChannelConfig {
   verificationToken?: string;
   encryptKey?: string;
   useWebSocket?: boolean;
+  /** `feishu` (default, open.feishu.cn) or `lark` (open.larksuite.com). */
+  domain?: FeishuDomain;
   dm: {
     policy: 'open' | 'pairing' | 'allowlist';
     allowFrom?: string[];
