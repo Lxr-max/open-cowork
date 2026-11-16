@@ -34,6 +34,21 @@ describe('Codex PR review context safety', () => {
     expect(deepSeekRunner).toContain('full review after prior context reset');
   });
 
+  it('loads review tooling from the default branch after checking out the PR base', () => {
+    const baseCheckout = workflow.indexOf('ref: ${{ github.event.pull_request.base.ref }}');
+    const tooling = workflow.indexOf('github.event.repository.default_branch');
+    const deepseekRun = workflow.indexOf('run: node .github/scripts/deepseek-pr-review.mjs');
+    const codexPrompt = workflow.indexOf('prompt-file: .github/prompts/codex-pr-review.md');
+
+    expect(baseCheckout).toBeGreaterThan(-1);
+    expect(tooling).toBeGreaterThan(baseCheckout);
+    expect(deepseekRun).toBeGreaterThan(tooling);
+    expect(codexPrompt).toBeGreaterThan(tooling);
+    expect(workflow).toContain('.github/scripts/deepseek-common.mjs');
+    expect(workflow).toContain('.github/prompts/codex-pr-review.md');
+    expect(workflow).toContain('never take these files from the PR head');
+  });
+
   it('treats the current PR diff as authoritative and documents advisory semantics', () => {
     expect(prompt).toContain('Authoritative scope');
     expect(prompt).toContain('After prior context is reset, do not load, repeat, or cite');

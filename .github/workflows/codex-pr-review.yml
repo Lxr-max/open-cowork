@@ -146,6 +146,34 @@ jobs:
             ${{ github.event.pull_request.base.ref }} \
             +refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/pull/${{ github.event.pull_request.number }}/head
 
+      # pull_request_target reads this workflow from the default branch, then the
+      # checkout above switches to the PR base. A base such as `dev` can lag and
+      # omit .github/scripts, which makes `node .github/scripts/deepseek-pr-review.mjs`
+      # fail with MODULE_NOT_FOUND. Overlay only the trusted reviewer files from
+      # the default branch; leave the rest of the worktree on the PR base, and
+      # never take these files from the PR head.
+      - name: Load review tooling from the default branch
+        if: steps.check_bot.outputs.has_review_for_current_head != 'true'
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEFAULT_BRANCH}" ]; then
+            echo "Repository default branch is empty." >&2
+            exit 1
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          tooling_ref="refs/remotes/origin/${DEFAULT_BRANCH}"
+          git checkout "${tooling_ref}" -- \
+            .github/scripts \
+            .github/prompts/codex-pr-review.md
+          test -s .github/scripts/deepseek-pr-review.mjs
+          test -s .github/scripts/deepseek-common.mjs
+          test -s .github/prompts/codex-pr-review.md
+          echo "Review tooling loaded from $(git rev-parse "${tooling_ref}") (${DEFAULT_BRANCH})"
+
       - name: Resolve review provider config
         if: steps.check_bot.outputs.has_review_for_current_head != 'true'
         id: review_config
