@@ -85,6 +85,8 @@ import {
 import { fetchOllamaModelInfo } from '../config/ollama-api';
 import { createWindowsBashOperations } from './windows-bash-operations';
 import { createLimaSandboxCodingTools, VIRTUAL_WORKSPACE_PATH } from './lima-sandbox-operations';
+import { createWslSandboxCodingTools } from './wsl-sandbox-operations';
+import { selectSandboxToolBackend } from './sandbox-tool-backend';
 import { createCompactionExtensionFactory } from './compaction-extension';
 
 /**
@@ -1048,10 +1050,10 @@ ${hints.join('\n')}
     tools: ToolDefinition[],
     sessionId: string,
     effectiveCwd: string,
-    useLimaSandbox: boolean
+    useGuestSandbox: boolean
   ): ToolDefinition[] {
-    // Lima commands, including sudo, stay in the guest tool backend.
-    if (useLimaSandbox || !this.requestSudoPassword) return tools;
+    // Guest commands, including sudo, stay in the Lima or WSL tool backend.
+    if (useGuestSandbox || !this.requestSudoPassword) return tools;
 
     const requestSudoPassword = this.requestSudoPassword;
 
@@ -1203,6 +1205,7 @@ ${hints.join('\n')}
     // Sandbox isolation state (defined outside try for finally access)
     let sandboxPath: string | null = null;
     let useSandboxIsolation = false;
+    let executedInGuest = false;
 
     // Helper to convert real sandbox paths back to virtual workspace paths in output
     // Cache the compiled regex to avoid recompilation on every call
@@ -1696,8 +1699,18 @@ ${hints.join('\n')}
 
       // the agent SDK handles path sandboxing via its own tools
       const imageCapable = true; // pi-ai models generally support images; let the model handle unsupported cases
-      const effectiveCwd =
-        useSandboxIsolation && sandboxPath ? sandboxPath : workingDir || process.cwd();
+      const sandboxBackend = selectSandboxToolBackend({
+        useSandboxIsolation,
+        sandboxPath,
+        isLima: sandbox.isLima,
+        isWSL: sandbox.isWSL,
+        wslDistro: sandbox.wslStatus?.distro,
+      });
+      executedInGuest = sandboxBackend.kind !== 'host';
+      const guestSandboxPath = sandboxBackend.path;
+      // A guest directory is not a host path. Host tools keep the Windows or
+      // macOS working directory when no guest backend is available.
+      const effectiveCwd = (guestSandboxPath ?? workingDir) || process.cwd();
 
       // Use app-specific Claude config directory to avoid conflicts with user settings
       // SDK uses CLAUDE_CONFIG_DIR to locate skills
@@ -2140,22 +2153,24 @@ Tool routing:
       // executed via Pi SDK's Bash tool can find bundled and user-installed executables.
       await enrichProcessPathForBuild();
 
-      // Lima creates the session directory inside the VM. Host bash checks that
-      // path with existsSync, fails, and the UI then rewrites it to /workspace.
-      // Run the coding tools in the guest and keep those implementations: the
-      // SDK otherwise rebuilds host-local tools from cwd.
-      const guestSandboxPath =
-        useSandboxIsolation && sandbox.isLima && sandboxPath ? sandboxPath : null;
+      // Lima and WSL create the session directory inside the guest. Host bash
+      // checks that path with existsSync, fails, and the UI then rewrites it to
+      // /workspace. Run the coding tools in the guest and keep those
+      // implementations: the SDK otherwise rebuilds host-local tools from cwd.
       // The guest read tool resizes images on the host like the local one, so both get the wrapper.
       const codingTools = wrapReadToolForImageResizeErrors(
-        (guestSandboxPath
-          ? createLimaSandboxCodingTools(guestSandboxPath)
-          : createCodingTools(
-              effectiveCwd,
-              process.platform === 'win32'
-                ? { bash: { operations: createWindowsBashOperations() } }
-                : undefined
-            )) as ToolDefinition[]
+        (sandboxBackend.kind === 'lima'
+          ? createLimaSandboxCodingTools(sandboxBackend.path)
+          : sandboxBackend.kind === 'wsl'
+            ? createWslSandboxCodingTools(sandboxBackend.path, {
+                distro: sandboxBackend.distro,
+              })
+            : createCodingTools(
+                effectiveCwd,
+                process.platform === 'win32'
+                  ? { bash: { operations: createWindowsBashOperations() } }
+                  : undefined
+              )) as ToolDefinition[]
       );
 
       // Inject a default 120s timeout for bash commands when the model omits one
@@ -3045,7 +3060,7 @@ Tool routing:
       this.pathResolver.unregisterSession(session.id);
 
       // Sync changes from sandbox back to host OS (but don't cleanup - sandbox persists)
-      if (useSandboxIsolation && sandboxPath) {
+      if (executedInGuest && sandboxPath) {
         try {
           const sandbox = getSandboxAdapter();
 

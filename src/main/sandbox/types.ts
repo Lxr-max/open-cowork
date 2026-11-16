@@ -49,6 +49,8 @@ export interface WSLStatus {
   claudeCodeAvailable?: boolean;
   version?: string;
   pythonVersion?: string;
+  /** Why a Windows machine cannot enter the WSL sandbox. Absent when available. */
+  error?: 'not-installed' | 'no-distro' | 'unreadable-distros' | 'distro-not-responding' | 'wsl1';
 }
 
 export interface LimaStatus {

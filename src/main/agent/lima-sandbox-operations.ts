@@ -64,12 +64,18 @@ export interface LimaSandboxOperationsOptions {
   instanceName?: string;
 }
 
-interface GuestRunOptions {
+export interface GuestRunOptions {
   stdin?: Buffer;
   timeoutSeconds?: number;
   onData?: (chunk: Buffer) => void;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
+}
+
+export interface GuestScriptResult {
+  exitCode: number | null;
+  stdout: Buffer;
+  stderr: Buffer;
 }
 
 function defaultSpawn(command: string, args: string[], options: SpawnOptions): ChildProcess {
@@ -196,13 +202,12 @@ function asBuffer(data: Buffer | string): Buffer {
   return Buffer.isBuffer(data) ? data : Buffer.from(data);
 }
 
-function runGuestScript(
+export function spawnGuestScript(
   spawnProcess: SpawnProcess,
-  instanceName: string,
-  script: string,
+  command: string,
+  args: string[],
   options: GuestRunOptions = {}
-): Promise<{ exitCode: number | null; stdout: Buffer; stderr: Buffer }> {
-  const validatedInstance = assertInstanceName(instanceName);
+): Promise<GuestScriptResult> {
   return new Promise((resolve, reject) => {
     if (options.signal?.aborted) {
       reject(new Error('aborted'));
@@ -211,10 +216,9 @@ function runGuestScript(
 
     let child: ChildProcess;
     try {
-      // limactl needs the host HOME/PATH to locate its VM and SSH. Full guest
-      // environment forwarding is opt-in on Lima 2+; this command does not enable it.
-      // https://github.com/lima-vm/lima/blob/v2.0.0/cmd/limactl/shell.go (--preserve-env)
-      child = spawnProcess('limactl', ['shell', validatedInstance, '--', 'bash', '-c', script], {
+      // The host PATH has to contain limactl or wsl. Guest environment
+      // forwarding stays opt-in; this spawn does not enable it.
+      child = spawnProcess(command, args, {
         env: { ...process.env, ...options.env },
         stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       });
@@ -320,14 +324,29 @@ function runGuestScript(
   });
 }
 
-async function runGuestOrThrow(
+function runGuestScript(
   spawnProcess: SpawnProcess,
   instanceName: string,
   script: string,
-  stdin?: Buffer,
-  checkedPath?: string
-): Promise<Buffer> {
-  const result = await runGuestScript(spawnProcess, instanceName, script, { stdin });
+  options: GuestRunOptions = {}
+): Promise<GuestScriptResult> {
+  const validatedInstance = assertInstanceName(instanceName);
+  // limactl needs the host HOME/PATH to locate its VM and SSH. Full guest
+  // environment forwarding is opt-in on Lima 2+; this command does not enable it.
+  // https://github.com/lima-vm/lima/blob/v2.0.0/cmd/limactl/shell.go (--preserve-env)
+  return spawnGuestScript(
+    spawnProcess,
+    'limactl',
+    ['shell', validatedInstance, '--', 'bash', '-c', script],
+    options
+  );
+}
+
+export function readGuestStdout(
+  result: GuestScriptResult,
+  checkedPath: string | undefined,
+  failureLabel: string
+): Buffer {
   if (result.exitCode === GUEST_FILE_MISSING_EXIT_CODE && checkedPath !== undefined) {
     throw Object.assign(new Error(`ENOENT: no such file or directory, '${checkedPath}'`), {
       code: 'ENOENT',
@@ -351,9 +370,78 @@ async function runGuestOrThrow(
   }
   if (result.exitCode !== 0) {
     const detail = result.stderr.toString().trim() || result.stdout.toString().trim();
-    throw new Error(detail || `Lima command failed with code ${result.exitCode}`);
+    throw new Error(detail || `${failureLabel} command failed with code ${result.exitCode}`);
   }
   return result.stdout;
+}
+
+async function runGuestOrThrow(
+  spawnProcess: SpawnProcess,
+  instanceName: string,
+  script: string,
+  stdin?: Buffer,
+  checkedPath?: string
+): Promise<Buffer> {
+  const result = await runGuestScript(spawnProcess, instanceName, script, { stdin });
+  return readGuestStdout(result, checkedPath, 'Lima');
+}
+
+export type CheckedGuestScript = (
+  script: string,
+  stdin?: Buffer,
+  checkedPath?: string
+) => Promise<Buffer>;
+
+export function createPosixGuestFileOperations(
+  sandboxPath: string,
+  runChecked: CheckedGuestScript
+): { read: ReadOperations; write: WriteOperations; edit: EditOperations } {
+  const root = assertSandboxPath(sandboxPath);
+  const guestPath = (pathValue: string) =>
+    shellEscapePath(mapVirtualWorkspacePath(pathValue, root));
+
+  // Existence and permission are checked by the guest command that reads, so a
+  // read costs two guest calls. `access` has nothing left to check on its own.
+  const guardedRead = (absolutePath: string, command: string): Promise<Buffer> => {
+    const target = `'${guestPath(absolutePath)}'`;
+    return runChecked(
+      `test -e ${target} || exit ${GUEST_FILE_MISSING_EXIT_CODE}; ` +
+        `test ! -d ${target} || exit ${GUEST_FILE_IS_DIRECTORY_EXIT_CODE}; ` +
+        `test -r ${target} || exit ${GUEST_FILE_PERMISSION_EXIT_CODE}; ${command} -- ${target}`,
+      undefined,
+      absolutePath
+    );
+  };
+
+  const read: ReadOperations = {
+    access: () => Promise.resolve(),
+    readFile: (absolutePath) => guardedRead(absolutePath, 'cat'),
+    detectImageMimeType: async (absolutePath) => {
+      const header = await guardedRead(absolutePath, `head -c ${IMAGE_SNIFF_BYTES}`);
+      return imageMimeTypeFromHeader(header.subarray(0, IMAGE_SNIFF_BYTES));
+    },
+  };
+
+  const write: WriteOperations = {
+    mkdir: (dir) => runChecked(`mkdir -p -- '${guestPath(dir)}'`).then(() => undefined),
+    writeFile: (absolutePath, content) =>
+      runChecked(`cat > '${guestPath(absolutePath)}'`, Buffer.from(content)).then(() => undefined),
+  };
+
+  const edit: EditOperations = {
+    access: (absolutePath) =>
+      runChecked(
+        `test -e '${guestPath(absolutePath)}' || exit ${GUEST_FILE_MISSING_EXIT_CODE}; ` +
+          `{ test -r '${guestPath(absolutePath)}' && test -w '${guestPath(absolutePath)}'; } ` +
+          `|| exit ${GUEST_FILE_PERMISSION_EXIT_CODE}`,
+        undefined,
+        absolutePath
+      ).then(() => undefined),
+    readFile: read.readFile,
+    writeFile: write.writeFile,
+  };
+
+  return { read, write, edit };
 }
 
 export function createLimaSandboxBashOperations(
@@ -379,67 +467,11 @@ export function createLimaSandboxFileOperations(
   sandboxPath: string,
   options: LimaSandboxOperationsOptions = {}
 ): { read: ReadOperations; write: WriteOperations; edit: EditOperations } {
-  const root = assertSandboxPath(sandboxPath);
   const instanceName = options.instanceName ?? LIMA_SANDBOX_INSTANCE;
   const spawnProcess = options.spawnProcess ?? defaultSpawn;
-
-  const guestPath = (pathValue: string) =>
-    shellEscapePath(mapVirtualWorkspacePath(pathValue, root));
-
-  // Existence and permission are checked by the guest command that reads, so a
-  // read costs two guest calls. `access` has nothing left to check on its own.
-  const guardedRead = (absolutePath: string, command: string): Promise<Buffer> => {
-    const target = `'${guestPath(absolutePath)}'`;
-    return runGuestOrThrow(
-      spawnProcess,
-      instanceName,
-      `test -e ${target} || exit ${GUEST_FILE_MISSING_EXIT_CODE}; ` +
-        `test ! -d ${target} || exit ${GUEST_FILE_IS_DIRECTORY_EXIT_CODE}; ` +
-        `test -r ${target} || exit ${GUEST_FILE_PERMISSION_EXIT_CODE}; ${command} -- ${target}`,
-      undefined,
-      absolutePath
-    );
-  };
-
-  const read: ReadOperations = {
-    access: () => Promise.resolve(),
-    readFile: (absolutePath) => guardedRead(absolutePath, 'cat'),
-    detectImageMimeType: async (absolutePath) => {
-      const header = await guardedRead(absolutePath, `head -c ${IMAGE_SNIFF_BYTES}`);
-      return imageMimeTypeFromHeader(header.subarray(0, IMAGE_SNIFF_BYTES));
-    },
-  };
-
-  const write: WriteOperations = {
-    mkdir: (dir) =>
-      runGuestOrThrow(spawnProcess, instanceName, `mkdir -p -- '${guestPath(dir)}'`).then(
-        () => undefined
-      ),
-    writeFile: (absolutePath, content) =>
-      runGuestOrThrow(
-        spawnProcess,
-        instanceName,
-        `cat > '${guestPath(absolutePath)}'`,
-        Buffer.from(content)
-      ).then(() => undefined),
-  };
-
-  const edit: EditOperations = {
-    access: (absolutePath) =>
-      runGuestOrThrow(
-        spawnProcess,
-        instanceName,
-        `test -e '${guestPath(absolutePath)}' || exit ${GUEST_FILE_MISSING_EXIT_CODE}; ` +
-          `{ test -r '${guestPath(absolutePath)}' && test -w '${guestPath(absolutePath)}'; } ` +
-          `|| exit ${GUEST_FILE_PERMISSION_EXIT_CODE}`,
-        undefined,
-        absolutePath
-      ).then(() => undefined),
-    readFile: read.readFile,
-    writeFile: write.writeFile,
-  };
-
-  return { read, write, edit };
+  return createPosixGuestFileOperations(sandboxPath, (script, stdin, checkedPath) =>
+    runGuestOrThrow(spawnProcess, instanceName, script, stdin, checkedPath)
+  );
 }
 
 /**
@@ -447,25 +479,27 @@ export function createLimaSandboxFileOperations(
  * The pi SDK checks the working directory on the host before local bash, and
  * the Lima sandbox path is not a host path, so these tools must not use that backend.
  */
-export function createLimaSandboxCodingTools(
+export function createGuestCodingTools(
   sandboxPath: string,
-  options: LimaSandboxOperationsOptions = {}
+  files: { read: ReadOperations; write: WriteOperations; edit: EditOperations },
+  bashOperations: BashOperations,
+  outputFilePrefix: string
 ): [
   ReturnType<typeof createReadTool>,
   ReturnType<typeof createBashTool>,
   ReturnType<typeof createEditTool>,
   ReturnType<typeof createWriteTool>,
 ] {
-  const files = createLimaSandboxFileOperations(sandboxPath, options);
   const hostOutputDirectory = tmpdir();
-  const hostOutputPrefix = `cowork-lima-${randomUUID()}`;
   // A private filename namespace keeps old outputs readable without retaining every path.
-  const hostOutputPattern = new RegExp(`^${hostOutputPrefix}-[0-9a-f]{16}\\.log$`);
+  const hostOutputPattern = new RegExp(
+    `^${outputFilePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-[0-9a-f]{16}\\.log$`
+  );
   const isHostOutputPath = (absolutePath: string) =>
     dirname(absolutePath) === hostOutputDirectory && hostOutputPattern.test(basename(absolutePath));
   const bash = createBashTool(sandboxPath, {
-    operations: createLimaSandboxBashOperations(sandboxPath, options),
-    outputFilePrefix: hostOutputPrefix,
+    operations: bashOperations,
+    outputFilePrefix,
     outputDirectory: hostOutputDirectory,
   });
 
@@ -490,4 +524,16 @@ export function createLimaSandboxCodingTools(
     createEditTool(sandboxPath, { operations: files.edit }),
     createWriteTool(sandboxPath, { operations: files.write }),
   ];
+}
+
+export function createLimaSandboxCodingTools(
+  sandboxPath: string,
+  options: LimaSandboxOperationsOptions = {}
+): ReturnType<typeof createGuestCodingTools> {
+  return createGuestCodingTools(
+    sandboxPath,
+    createLimaSandboxFileOperations(sandboxPath, options),
+    createLimaSandboxBashOperations(sandboxPath, options),
+    `cowork-lima-${randomUUID()}`
+  );
 }

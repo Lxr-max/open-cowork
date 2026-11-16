@@ -15,6 +15,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
 import { log, logError, logWarn } from '../utils/logger';
+import { decodeWslCommandOutput, interpretWslDistroProbe } from './wsl-detection';
 import type {
   WSLStatus,
   SandboxConfig,
@@ -40,6 +41,30 @@ const execFileAsync = promisify(execFile);
 
 function escapeForDoubleQuotes(s: string): string {
   return s.replace(/[\\$`"!]/g, '\\$&');
+}
+
+function isWslCommandMissing(error: unknown): boolean {
+  const err = error as NodeJS.ErrnoException;
+  if (err?.code === 'ENOENT') return true;
+  const message = err?.message || '';
+  return /ENOENT|not recognized as an internal or external command|is not recognized/i.test(
+    message
+  );
+}
+
+/** Piped wsl.exe output is UTF-16LE unless this is set. Both forms are decoded. */
+function wslExecEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, WSL_UTF8: '1' };
+}
+
+async function readWslText(args: string[], timeout: number): Promise<string> {
+  const { stdout } = await execFileAsync('wsl', args, {
+    timeout,
+    encoding: 'buffer' as BufferEncoding,
+    env: wslExecEnv(),
+  });
+  const raw = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+  return decodeWslCommandOutput(raw);
 }
 
 /**
@@ -119,88 +144,72 @@ export class WSLBridge implements SandboxExecutor {
   private initPromise: Promise<void> | null = null;
 
   /**
-   * Decode UTF-16LE buffer to string (Windows WSL output)
-   */
-  private static decodeWSLOutput(buffer: Buffer | string): string {
-    if (typeof buffer === 'string') {
-      // Already a string, but may have null chars from UTF-16
-      return buffer.replace(/\0/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-    }
-
-    // Try UTF-16LE first (Windows default for WSL commands)
-    try {
-      const decoded = buffer
-        .toString('utf16le')
-        .replace(/\0/g, '')
-        .replace(/\r\n/g, '\n')
-        .replace(/\r/g, '\n')
-        .trim();
-      // Check if decoding looks valid (contains only printable ASCII and common chars)
-      if (decoded && /^[\x20-\x7E\n\-_.]+$/.test(decoded)) {
-        return decoded;
-      }
-    } catch {
-      /* ignore */
-    }
-
-    // Fallback to UTF-8
-    return buffer
-      .toString('utf-8')
-      .replace(/\0/g, '')
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n')
-      .trim();
-  }
-
-  /**
-   * Check if WSL2 is available on this system
+   * Check if WSL2 is available on this system.
+   * Availability is a distro probe, not a Windows edition or CPU allowlist.
    */
   static async checkWSLStatus(): Promise<WSLStatus> {
     try {
-      // First, try a simple WSL command to check if it works at all
+      let listFailed = false;
+      let commandMissing = false;
+      let listOutput = '';
       try {
-        await execFileAsync('wsl', ['--status'], { timeout: 5000 });
-      } catch (statusError) {
-        log('[WSL] WSL --status failed, WSL may not be properly configured');
-        // Continue anyway, as --status might not be available on older versions
+        // encoding buffer: wsl.exe writes the distro list as UTF-16LE.
+        const { stdout } = await execFileAsync('wsl', ['--list', '--quiet'], {
+          encoding: 'buffer' as BufferEncoding,
+          timeout: 10000,
+          env: wslExecEnv(),
+        });
+        const rawBuffer = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+        listOutput = decodeWslCommandOutput(rawBuffer);
+        log('[WSL] Raw output (hex):', rawBuffer.slice(0, 100).toString('hex'));
+        log('[WSL] Decoded output:', JSON.stringify(listOutput));
+      } catch (listError) {
+        listFailed = true;
+        commandMissing = isWslCommandMissing(listError);
+        const stdout = (listError as { stdout?: Buffer | string }).stdout;
+        if (stdout && !commandMissing) {
+          const raw = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+          listOutput = decodeWslCommandOutput(raw);
+        }
+        log('[WSL] WSL --list failed:', (listError as Error).message);
       }
 
-      // Get list of distros - use encoding: 'buffer' to handle UTF-16
-      const { stdout } = await execFileAsync('wsl', ['--list', '--quiet'], {
-        encoding: 'buffer' as BufferEncoding,
-        timeout: 10000,
+      const listed = interpretWslDistroProbe({
+        commandMissing,
+        listFailed,
+        listOutput,
+        distroResponded: true,
+        kernelRelease: null,
       });
-
-      // Decode the output properly (Windows uses UTF-16LE for WSL output)
-      const rawBuffer = stdout as unknown as Buffer;
-      const decodedOutput = WSLBridge.decodeWSLOutput(rawBuffer);
-
-      // Parse available distros - filter out empty lines and garbage
-      const distros = decodedOutput
-        .split(/\r?\n/)
-        .map((d) => d.trim())
-        .filter((d) => d && d.length > 0 && /^[a-zA-Z0-9\-_.]+$/.test(d));
-
-      log('[WSL] Raw output (hex):', rawBuffer.slice(0, 100).toString('hex'));
-      log('[WSL] Decoded output:', JSON.stringify(decodedOutput));
-      log('[WSL] Parsed distros:', distros);
-
-      if (distros.length === 0) {
-        return { available: false };
+      if (!listed.available || !listed.distro) {
+        log('[WSL] Distro list is not usable:', listed.error);
+        return { available: false, error: listed.error };
       }
 
-      // Prefer Ubuntu, otherwise use first available
-      const ubuntu = distros.find((d) => d.toLowerCase().includes('ubuntu'));
-      const selectedDistro = ubuntu || distros[0];
-      WSLBridge.validateDistroName(selectedDistro);
+      const selectedDistro = WSLBridge.validateDistroName(listed.distro);
       log('[WSL] Selected distro:', selectedDistro);
 
-      // Test if the distro actually works (WSL service might be broken)
       const distroWorks = await WSLBridge.testDistro(selectedDistro);
-      if (!distroWorks) {
-        log('[WSL] Selected distro is not responding. WSL service may need restart.');
-        log('[WSL] Try: wsl --shutdown (in PowerShell as Admin), then restart the app');
-        return { available: false };
+      const kernelRelease = distroWorks ? await WSLBridge.readKernelRelease(selectedDistro) : null;
+      const probe = interpretWslDistroProbe({
+        commandMissing: false,
+        listFailed: false,
+        listOutput,
+        distroResponded: distroWorks,
+        kernelRelease,
+      });
+      if (!probe.available || !probe.distro) {
+        if (probe.error === 'distro-not-responding') {
+          log('[WSL] Selected distro is not responding. WSL service may need restart.');
+          log('[WSL] Try: wsl --shutdown (in PowerShell as Admin), then restart the app');
+        } else if (probe.error === 'wsl1') {
+          log(
+            '[WSL] Selected distro is WSL1. Convert it with: wsl --set-version',
+            selectedDistro,
+            '2'
+          );
+        }
+        return { available: false, error: probe.error, distro: probe.distro };
       }
       log('[WSL] Distro is responding');
 
@@ -210,12 +219,7 @@ export class WSLBridge implements SandboxExecutor {
       let nodeVersion = '';
       try {
         // Use simpler command format without bash -c
-        const nodeResult = await execFileAsync(
-          'wsl',
-          ['-d', selectedDistro, '-e', 'node', '--version'],
-          { timeout: 10000, encoding: 'utf-8' }
-        );
-        const output = nodeResult.stdout.trim();
+        const output = await readWslText(['-d', selectedDistro, '-e', 'node', '--version'], 10000);
         if (output.startsWith('v')) {
           nodeAvailable = true;
           nodeVersion = output;
@@ -224,8 +228,7 @@ export class WSLBridge implements SandboxExecutor {
       } catch (error) {
         // Try alternative: check with nvm
         try {
-          const nvmResult = await execFileAsync(
-            'wsl',
+          const output = await readWslText(
             [
               '-d',
               selectedDistro,
@@ -234,9 +237,8 @@ export class WSLBridge implements SandboxExecutor {
               '-c',
               'source ~/.nvm/nvm.sh 2>/dev/null && node --version',
             ],
-            { timeout: 10000, encoding: 'utf-8' }
+            10000
           );
-          const output = nvmResult.stdout.trim();
           if (output.startsWith('v')) {
             nodeAvailable = true;
             nodeVersion = output + ' (nvm)';
@@ -252,8 +254,7 @@ export class WSLBridge implements SandboxExecutor {
       let claudeCodeAvailable = false;
       if (nodeAvailable) {
         try {
-          const claudeResult = await execFileAsync(
-            'wsl',
+          const output = await readWslText(
             [
               '-d',
               selectedDistro,
@@ -262,9 +263,8 @@ export class WSLBridge implements SandboxExecutor {
               '-c',
               'source ~/.nvm/nvm.sh 2>/dev/null; which claude && claude --version',
             ],
-            { timeout: 10000, encoding: 'utf-8' }
+            10000
           );
-          const output = claudeResult.stdout.trim();
           if (output) {
             claudeCodeAvailable = true;
             log('[WSL] claude-code found:', output);
@@ -280,12 +280,10 @@ export class WSLBridge implements SandboxExecutor {
       let pipAvailable = false;
       let pythonVersion = '';
       try {
-        const pythonResult = await execFileAsync(
-          'wsl',
+        const output = await readWslText(
           ['-d', selectedDistro, '-e', 'python3', '--version'],
-          { timeout: 10000, encoding: 'utf-8' }
+          10000
         );
-        const output = pythonResult.stdout.trim();
         if (output.startsWith('Python')) {
           pythonAvailable = true;
           pythonVersion = output;
@@ -325,7 +323,10 @@ export class WSLBridge implements SandboxExecutor {
       return status;
     } catch (error) {
       log('[WSL] WSL not available:', (error as Error).message);
-      return { available: false };
+      return {
+        available: false,
+        error: isWslCommandMissing(error) ? 'not-installed' : 'distro-not-responding',
+      };
     }
   }
 
@@ -335,17 +336,26 @@ export class WSLBridge implements SandboxExecutor {
   static async testDistro(distro: string): Promise<boolean> {
     try {
       WSLBridge.validateDistroName(distro);
-      const { stdout } = await execFileAsync('wsl', ['-d', distro, '-e', 'echo', 'OK'], {
-        timeout: 10000,
-        encoding: 'utf-8',
-      });
-      return stdout.trim() === 'OK';
+      // Exact equality against the raw pipe fails: wsl.exe emits UTF-16LE
+      // unless WSL_UTF8=1, so "OK" arrives with NULs between the letters.
+      const output = await readWslText(['-d', distro, '-e', 'echo', 'OK'], 10000);
+      return output === 'OK';
     } catch (error) {
       const errMsg = (error as Error).message || '';
       if (errMsg.includes('E_UNEXPECTED') || errMsg.includes('4294967295')) {
         log('[WSL] Distro test failed - WSL service error. Try: wsl --shutdown');
       }
       return false;
+    }
+  }
+
+  private static async readKernelRelease(distro: string): Promise<string | null> {
+    try {
+      const release = await readWslText(['-d', distro, '-e', 'uname', '-r'], 10000);
+      return release || null;
+    } catch (error) {
+      log('[WSL] Could not read kernel release:', (error as Error).message);
+      return null;
     }
   }
 

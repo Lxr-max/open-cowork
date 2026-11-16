@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { Shield, AlertCircle, CheckCircle, Settings, Loader2 } from 'lucide-react';
 import { renderLocalizedBannerMessage } from './shared';
 import type { LocalizedBanner } from './shared';
@@ -19,6 +20,7 @@ interface SandboxStatus {
     pythonVersion?: string;
     pipAvailable?: boolean;
     claudeCodeAvailable?: boolean;
+    error?: 'not-installed' | 'no-distro' | 'unreadable-distros' | 'distro-not-responding' | 'wsl1';
   };
   lima?: {
     available: boolean;
@@ -41,6 +43,7 @@ export function SettingsSandbox() {
   const [status, setStatus] = useState<SandboxStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isChecking, setIsChecking] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [isInstalling, setIsInstalling] = useState<string | null>(null);
   const [error, setError] = useState<LocalizedBanner | null>(null);
   const [success, setSuccess] = useState<LocalizedBanner | null>(null);
@@ -92,19 +95,42 @@ export function SettingsSandbox() {
     };
   }, [t]);
 
-  async function loadStatus() {
+  async function loadStatus(): Promise<boolean> {
     try {
       const s = await window.electronAPI.sandbox.getStatus();
       setStatus(s);
       setError(null);
+      return true;
     } catch (err) {
       console.error('Failed to load sandbox status:', err);
       setError({ text: t('sandbox.failedToLoad') });
+      return false;
     }
   }
 
-  // TODO: Re-enable when sandbox debugging is complete
-  // async function handleToggleSandbox() { ... }
+  async function handleToggleSandbox() {
+    if (isSaving || isInstalling !== null) return;
+    const newEnabled = !sandboxEnabled;
+
+    setSandboxEnabled(newEnabled);
+    setError(null);
+    setSuccess(null);
+    setIsSaving(true);
+
+    try {
+      await window.electronAPI.config.save({ sandboxEnabled: newEnabled });
+      const loaded = await loadStatus();
+      if (loaded) {
+        setSuccess({ text: newEnabled ? t('sandbox.enabledWillSetup') : t('sandbox.disabled') });
+        setTimeout(() => setSuccess(null), 3000);
+      }
+    } catch (err) {
+      setSandboxEnabled(!newEnabled);
+      setError({ text: err instanceof Error ? err.message : t('sandbox.failedToSave') });
+    } finally {
+      setIsSaving(false);
+    }
+  }
 
   async function handleCheckStatus() {
     if (isChecking) return; // Prevent double-click
@@ -278,15 +304,18 @@ export function SettingsSandbox() {
   }
 
   const sandboxAvailable = isWindows
-    ? status?.wsl?.available
+    ? Boolean(status?.wsl?.available)
     : isMac
-      ? status?.lima?.available
-      : false;
+      ? Boolean(status?.lima?.available)
+      : true;
   const sandboxReady = isWindows
-    ? status?.wsl?.available && status?.wsl?.nodeAvailable
+    ? Boolean(status?.wsl?.available && status?.wsl?.nodeAvailable)
     : isMac
-      ? status?.lima?.available && status?.lima?.instanceRunning && status?.lima?.nodeAvailable
-      : false;
+      ? Boolean(
+          status?.lima?.available && status?.lima?.instanceRunning && status?.lima?.nodeAvailable
+        )
+      : true;
+  const wslBlock = wslUnavailableCopy(status?.wsl?.error, status?.wsl?.distro, t);
   const sandboxStatusText = !sandboxEnabled
     ? t('sandbox.disabledStatus')
     : sandboxReady
@@ -310,22 +339,46 @@ export function SettingsSandbox() {
       )}
 
       {/* Sandbox overview */}
-      <div className="p-6 rounded-lg bg-surface border border-border text-center space-y-4">
-        <div className="w-16 h-16 rounded-lg flex items-center justify-center mx-auto bg-surface-muted text-text-muted">
-          <Shield className="w-8 h-8" />
+      <div className="p-6 rounded-lg bg-surface border border-border space-y-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-surface-muted text-text-muted">
+              <Shield className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-base font-semibold text-text-primary">
+                {t('sandbox.enableSandbox')}
+              </h3>
+              <p className="text-sm text-text-muted mt-1">
+                {isWindows
+                  ? t('sandbox.wslDesc')
+                  : isMac
+                    ? t('sandbox.limaDesc')
+                    : t('sandbox.nativeDesc')}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleToggleSandbox}
+            disabled={isSaving || isInstalling !== null}
+            role="switch"
+            aria-checked={sandboxEnabled}
+            aria-label={t('sandbox.enableSandbox')}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 disabled:opacity-50 flex-shrink-0 ${
+              sandboxEnabled ? 'bg-accent' : 'bg-surface-muted'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-text-primary shadow transition-transform ${
+                sandboxEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
         </div>
-        <div>
-          <h3 className="text-base font-semibold text-text-primary">
-            {t('sandbox.enableSandbox')}
-          </h3>
-          <p className="text-sm text-text-muted mt-1">
-            {isWindows
-              ? t('sandbox.wslDesc')
-              : isMac
-                ? t('sandbox.limaDesc')
-                : t('sandbox.nativeDesc')}
-          </p>
-        </div>
+        {isWindows && (
+          <p className="text-xs text-text-muted leading-5">{t('sandbox.windowsRequirement')}</p>
+        )}
         <div
           className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${
             sandboxReady
@@ -342,7 +395,7 @@ export function SettingsSandbox() {
           )}
           <span>{sandboxStatusText}</span>
         </div>
-        <p className="text-xs text-text-muted max-w-sm mx-auto">
+        <p className="text-xs text-text-muted">
           {t('sandbox.helpText1')} {t('sandbox.helpText2')}
         </p>
       </div>
@@ -434,10 +487,10 @@ export function SettingsSandbox() {
 
               {!status?.wsl?.available && (
                 <div className="mt-3 p-3 rounded-lg bg-warning/10 text-warning text-xs">
-                  <p className="font-medium mb-1">{t('sandbox.wslNotInstalled')}</p>
-                  <p className="opacity-80">{t('sandbox.wslInstallHint')}</p>
+                  <p className="font-medium mb-1">{wslBlock.title}</p>
+                  <p className="opacity-80">{wslBlock.hint}</p>
                   <code className="block mt-2 p-2 rounded bg-background font-mono text-xs">
-                    wsl --install
+                    {wslBlock.command}
                   </code>
                 </div>
               )}
@@ -554,6 +607,50 @@ export function SettingsSandbox() {
       )}
     </div>
   );
+}
+
+function shellDistro(distro: string | undefined): string {
+  return distro && /^[A-Za-z0-9._-]+$/.test(distro) ? distro : 'Ubuntu';
+}
+
+function wslUnavailableCopy(
+  error: string | undefined,
+  distro: string | undefined,
+  t: TFunction
+): { title: string; hint: string; command: string } {
+  const name = shellDistro(distro);
+  switch (error) {
+    case 'no-distro':
+      return {
+        title: t('sandbox.wslNoDistro'),
+        hint: t('sandbox.wslNoDistroHint'),
+        command: 'wsl --install -d Ubuntu',
+      };
+    case 'unreadable-distros':
+      return {
+        title: t('sandbox.wslUnreadable'),
+        hint: t('sandbox.wslUnreadableHint'),
+        command: 'wsl --list --verbose',
+      };
+    case 'distro-not-responding':
+      return {
+        title: t('sandbox.wslDistroNotResponding'),
+        hint: t('sandbox.wslDistroNotRespondingHint'),
+        command: 'wsl --shutdown',
+      };
+    case 'wsl1':
+      return {
+        title: t('sandbox.wslVersion1'),
+        hint: t('sandbox.wslVersion1Hint', { distro: name }),
+        command: `wsl --set-version ${name} 2`,
+      };
+    default:
+      return {
+        title: t('sandbox.wslNotInstalled'),
+        hint: t('sandbox.wslInstallHint'),
+        command: 'wsl --install',
+      };
+  }
 }
 
 function StatusItem({

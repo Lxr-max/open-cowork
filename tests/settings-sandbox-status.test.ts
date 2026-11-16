@@ -22,6 +22,16 @@ describe('SettingsSandbox status display', () => {
     expect(settingsSandboxContent).not.toContain('🚧');
   });
 
+  it('restores a working sandbox toggle instead of the debugging stub', () => {
+    expect(settingsSandboxContent).toContain('async function handleToggleSandbox()');
+    expect(settingsSandboxContent).toContain('role="switch"');
+    expect(settingsSandboxContent).toContain('sandboxEnabled: newEnabled');
+    expect(settingsSandboxContent).toContain("t('sandbox.windowsRequirement')");
+    expect(settingsSandboxContent).not.toContain(
+      'TODO: Re-enable when sandbox debugging is complete'
+    );
+  });
+
   it('renders real sandbox status details when sandbox is enabled', () => {
     expect(settingsSandboxContent).toContain('const sandboxStatusText =');
     expect(settingsSandboxContent).toContain("t('sandbox.readyStatus')");
