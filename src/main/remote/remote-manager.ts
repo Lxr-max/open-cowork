@@ -14,10 +14,12 @@ import { StdioChannel } from './channels/stdio-channel';
 import { remoteConfigStore } from './remote-config-store';
 import { tunnelManager, TunnelStatus } from './tunnel-manager';
 import { buildRemoteSessionTitle } from './remote-title';
+import { SessionNotFoundError } from '../session/session-errors';
 import type {
   GatewayStatus,
   GatewayConfig,
   FeishuChannelConfig,
+  SlackChannelConfig,
   ChannelType,
   RemoteMessage,
   RemoteSessionMapping,
@@ -27,6 +29,12 @@ import type {
 } from './types';
 import type { Message, ContentBlock, ServerEvent, Session } from '../../renderer/types/index';
 import { getFeishuWebhookConfigError } from '../../shared/feishu-webhook-config';
+import {
+  getSlackChannelConfigError,
+  mergeSlackChannelConfig,
+  parseSlackDmPolicy,
+  shouldApplySlackDmPolicyToGateway,
+} from '../../shared/slack-channel-config';
 
 // Agent executor interface - exported for use in main process
 export interface AgentExecutor {
@@ -39,6 +47,12 @@ export interface AgentExecutor {
   ): Promise<void>;
   stopSession(sessionId: string): Promise<void>;
   validateWorkingDirectory?(cwd: string): Promise<string | null> | string | null;
+  /**
+   * Optional existence probe for stale-binding detection: a channel binding may
+   * outlive its actual session (deleted from the desktop UI). When provided,
+   * executeAgent rebinds proactively instead of failing a turn first.
+   */
+  hasSession?(sessionId: string): boolean;
 }
 
 // Question/Permission request from agent
@@ -423,6 +437,83 @@ export class RemoteManager extends EventEmitter {
   }
 
   /**
+   * Update Slack channel config. Pass null to clear/disable the Slack channel.
+   */
+  async updateSlackConfig(config: SlackChannelConfig | null): Promise<void> {
+    if (!config) {
+      remoteConfigStore.clearSlackConfig();
+      if (this.gateway?.running) {
+        await this.restart();
+      }
+      return;
+    }
+
+    const configError = getSlackChannelConfigError(config);
+    if (configError) {
+      throw new Error(configError);
+    }
+
+    const merged = mergeSlackChannelConfig(remoteConfigStore.getSlackConfig(), config);
+    remoteConfigStore.setSlackConfig(merged);
+
+    // Sync Slack DM policy to gateway auth only when it would not relax a
+    // stricter mode already enforced by Feishu (or another channel).
+    if (merged.dm) {
+      const currentGateway = remoteConfigStore.getGatewayConfig();
+      const currentAuth = currentGateway.auth;
+      const slackPolicy = parseSlackDmPolicy(merged.dm.policy);
+
+      if (currentAuth.mode === 'token' || currentAuth.token) {
+        log(
+          '[RemoteManager] Skipping Slack DM policy sync: gateway uses token auth, preserving for other channels'
+        );
+      } else if (!shouldApplySlackDmPolicyToGateway(slackPolicy, currentAuth.mode)) {
+        log(
+          '[RemoteManager] Skipping Slack DM policy sync: would relax existing gateway auth mode',
+          currentAuth.mode
+        );
+      } else {
+        switch (slackPolicy) {
+          case 'open':
+            remoteConfigStore.setGatewayConfig({
+              auth: { ...currentAuth, mode: 'open' },
+            });
+            break;
+          case 'pairing':
+            remoteConfigStore.setGatewayConfig({
+              auth: { ...currentAuth, mode: 'pairing' },
+            });
+            break;
+          case 'allowlist': {
+            const slackEntries = (merged.dm.allowFrom ?? []).map((id) => `slack:${id}`);
+            const nonSlackEntries = (currentAuth.allowlist ?? []).filter(
+              (entry) => !entry.startsWith('slack:')
+            );
+            const pairedSlackEntries = remoteConfigStore
+              .getPairedUsers()
+              .filter((u) => u.channelType === 'slack')
+              .map((u) => `slack:${u.userId}`);
+            remoteConfigStore.setGatewayConfig({
+              auth: {
+                ...currentAuth,
+                mode: 'allowlist',
+                allowlist: [
+                  ...new Set([...nonSlackEntries, ...pairedSlackEntries, ...slackEntries]),
+                ],
+              },
+            });
+            break;
+          }
+        }
+      }
+    }
+
+    if (this.gateway?.running) {
+      await this.restart();
+    }
+  }
+
+  /**
    * Approve pairing request
    */
   approvePairing(channelType: ChannelType, userId: string): boolean {
@@ -530,6 +621,24 @@ export class RemoteManager extends EventEmitter {
       await this.removeRemoteSession(actualSessionId);
     }
     return this.messageRouter.clearSession(remoteSessionId);
+  }
+
+  /**
+   * Cascade cleanup when an actual session is deleted (desktop delete /
+   * batch delete): tear down every channel binding pointing at it.
+   *
+   * Triggered by the SessionManager onSessionDeleted extension hook (wired in
+   * index.ts). The executeAgent self-heal above is the safety net; this hook
+   * closes the dangling window at the moment of deletion instead.
+   */
+  async handleSessionDeleted(actualSessionId: string): Promise<void> {
+    const remoteSessionId = this.sessionIdMapping.get(actualSessionId);
+    if (!remoteSessionId) {
+      return; // Not a channel-bound session
+    }
+    await this.removeRemoteSession(actualSessionId);
+    this.messageRouter.clearSession(remoteSessionId);
+    log('[RemoteManager] Cleared channel binding for deleted session:', actualSessionId);
   }
 
   /**
@@ -1277,7 +1386,57 @@ export class RemoteManager extends EventEmitter {
     log('[RemoteManager] Working directory:', workingDirectory || '(default)');
 
     // Check if this is a new remote session
-    const isNewSession = !this.remoteSessionIds.has(sessionId);
+    let isNewSession = !this.remoteSessionIds.has(sessionId);
+
+    if (!isNewSession) {
+      // Continue existing session - use actual session ID
+      const actualSessionId = this.reverseSessionIdMapping.get(sessionId);
+      if (!actualSessionId) {
+        throw new Error(`No actual session ID found for remote session: ${sessionId}`);
+      }
+
+      // Proactive stale-binding probe: when the actual session was deleted from
+      // the desktop UI, rebind BEFORE emitting the user message, so renderer /
+      // stdio consumers never see a user turn aimed at a dead session.
+      if (this.agentExecutor.hasSession && !this.agentExecutor.hasSession(actualSessionId)) {
+        logWarn('[RemoteManager] Stale binding detected (session deleted), rebinding:', {
+          remoteSessionId: sessionId,
+          staleSessionId: actualSessionId,
+        });
+        await this.removeRemoteSession(actualSessionId);
+        isNewSession = true;
+      } else {
+        log('[RemoteManager] Continuing session:', actualSessionId, 'for remote:', sessionId);
+        try {
+          this.emitRemoteUserMessage(actualSessionId, content, prompt);
+          await this.agentExecutor.continueSession(
+            actualSessionId,
+            prompt,
+            content,
+            workingDirectory
+          );
+          return;
+        } catch (error) {
+          // Safety net for the probe→continue race and for executors without
+          // hasSession. Typed match first; the string fallback (anchored and
+          // case-sensitive, matching SessionManager's exact prefix) only covers
+          // executors that predate SessionNotFoundError. Any other error is
+          // rethrown untouched — only a deleted session justifies a rebuild.
+          const isSessionGone =
+            error instanceof SessionNotFoundError ||
+            (error instanceof Error && /^Session not found:/.test(error.message));
+          if (!isSessionGone) {
+            throw error;
+          }
+          logWarn('[RemoteManager] Stale binding detected, recreating session:', {
+            remoteSessionId: sessionId,
+            staleSessionId: actualSessionId,
+          });
+          await this.removeRemoteSession(actualSessionId);
+          isNewSession = true;
+        }
+      }
+    }
 
     if (isNewSession) {
       // Create new session with working directory
@@ -1317,15 +1476,6 @@ export class RemoteManager extends EventEmitter {
       });
 
       this.emitRemoteUserMessage(newSession.id, content, prompt);
-    } else {
-      // Continue existing session - use actual session ID
-      const actualSessionId = this.reverseSessionIdMapping.get(sessionId);
-      if (!actualSessionId) {
-        throw new Error(`No actual session ID found for remote session: ${sessionId}`);
-      }
-      log('[RemoteManager] Continuing session:', actualSessionId, 'for remote:', sessionId);
-      this.emitRemoteUserMessage(actualSessionId, content, prompt);
-      await this.agentExecutor.continueSession(actualSessionId, prompt, content, workingDirectory);
     }
 
     // Note: The actual response handling is done through the session manager

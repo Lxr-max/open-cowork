@@ -12,6 +12,7 @@
  * Dependencies: session-manager, config-store, mcp-manager, sandbox-adapter,
  *               skills-manager, scheduled-task-manager, nav-server, remote-manager
  */
+import './agent/install-image-resize-reporting';
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme, Tray } from 'electron';
 import { join, resolve, dirname, isAbsolute, basename } from 'path';
 import * as fs from 'fs';
@@ -26,6 +27,7 @@ import { MemoryService } from './memory/memory-service';
 import { MemoryExtension } from './memory/memory-extension';
 import { ConfigExtension } from './config/config-extension';
 import { SubagentExtension } from './agent/subagent-extension';
+import { TodoExtension } from './agent/todo-extension';
 import { AgentRuntimeExtensionManager } from './extensions/agent-runtime-extension-manager';
 import {
   configStore,
@@ -61,7 +63,12 @@ import type {
 } from '../renderer/types';
 import { remoteManager, type AgentExecutor } from './remote/remote-manager';
 import { remoteConfigStore } from './remote/remote-config-store';
-import type { GatewayConfig, FeishuChannelConfig, ChannelType } from './remote/types';
+import type {
+  GatewayConfig,
+  FeishuChannelConfig,
+  SlackChannelConfig,
+  ChannelType,
+} from './remote/types';
 import { startNavServer, stopNavServer } from './nav-server';
 import {
   ScheduledTaskManager,
@@ -69,6 +76,7 @@ import {
   type ScheduledTaskUpdateInput,
 } from './schedule/scheduled-task-manager';
 import { createScheduledTaskStore } from './schedule/scheduled-task-store';
+import { checkLocalCondition } from './schedule/local-condition-checker';
 import {
   buildScheduledTaskFallbackTitle,
   buildScheduledTaskTitle,
@@ -931,6 +939,7 @@ app
       const headlessExtensionManager = new AgentRuntimeExtensionManager([
         new MemoryExtension(memoryService),
         new ConfigExtension(configStore),
+        new TodoExtension(),
         new SubagentExtension(
           () => sessionManager?.getMCPManager() ?? null,
           sendToRenderer,
@@ -997,6 +1006,7 @@ app
       const headlessScheduledTaskStore = createScheduledTaskStore(db);
       scheduledTaskManager = new ScheduledTaskManager({
         store: headlessScheduledTaskStore,
+        checkCondition: checkLocalCondition,
         executeTask: async (task) => {
           if (!sessionManager) {
             throw new Error('Session manager not initialized');
@@ -1177,9 +1187,22 @@ app
           validateWorkingDirectory: (cwd) => {
             return getWorkspacePathUnsupportedReason(cwd) || null;
           },
+          hasSession: (sessionId) => {
+            if (!sessionManager) throw new Error('Session manager not initialized');
+            return sessionManager.hasSession(sessionId);
+          },
         };
         remoteManager.setAgentExecutor(stdioAgentExecutor);
         remoteManager.setRendererCallback(headlessSendWithPermission);
+
+        // Cascade channel-binding cleanup when a session is deleted, so a
+        // deleted channel session cannot leave a stale in-memory binding.
+        headlessExtensionManager.register({
+          name: 'remote-session-binding',
+          onSessionDeleted: async ({ sessionId }) => {
+            await remoteManager.handleSessionDeleted(sessionId);
+          },
+        });
 
         const stdioChannel = await remoteManager.startStdioMode(headlessArgs.cwd);
 
@@ -1316,12 +1339,25 @@ app
 
     // Initialize database
     const db = initDatabase();
+    // A run does not outlive its process, so a session still marked running was left by an earlier
+    // launch, but only when no other process can be running it. A dev run takes no single-instance
+    // lock, and a second instance that lost the lock is on its way out but still reaches this point.
+    if (!isDev && hasSingleInstanceLock) {
+      const interruptedSessions = db.sessions.markRunningIdle();
+      if (interruptedSessions > 0) {
+        log(
+          '[App] Marked sessions left running by the previous launch as idle:',
+          interruptedSessions
+        );
+      }
+    }
 
     pluginRuntimeService = new PluginRuntimeService(new PluginCatalogService());
     memoryService = new MemoryService(db);
     const extensionManager = new AgentRuntimeExtensionManager([
       new MemoryExtension(memoryService),
       new ConfigExtension(configStore),
+      new TodoExtension(),
       new SubagentExtension(
         () => sessionManager?.getMCPManager() ?? null,
         sendToRenderer,
@@ -1410,6 +1446,7 @@ app
     const scheduledTaskStore = createScheduledTaskStore(db);
     scheduledTaskManager = new ScheduledTaskManager({
       store: scheduledTaskStore,
+      checkCondition: checkLocalCondition,
       executeTask: async (task) => {
         if (!sessionManager) {
           throw new Error('Session manager not initialized');
@@ -1479,8 +1516,22 @@ app
         }
         return null;
       },
+      hasSession: (sessionId) => {
+        if (!sessionManager) throw new Error('Session manager not initialized');
+        return sessionManager.hasSession(sessionId);
+      },
     };
     remoteManager.setAgentExecutor(agentExecutor);
+
+    // Cascade channel-binding cleanup when a session is deleted from the
+    // desktop UI, so a deleted channel session cannot leave a stale in-memory
+    // binding (channel would otherwise keep failing until restart).
+    extensionManager.register({
+      name: 'remote-session-binding',
+      onSessionDeleted: async ({ sessionId }) => {
+        await remoteManager.handleSessionDeleted(sessionId);
+      },
+    });
 
     // 远程控制启用时启动
     if (remoteConfigStore.isEnabled()) {
@@ -2105,11 +2156,15 @@ ipcMain.handle('config.getPublicPath', () => {
 
 // MCP Server IPC handlers
 ipcMain.handle('mcp.getServers', () => {
+  return mcpConfigStore.getServers();
+});
+
+ipcMain.handle('mcp.getServersForSettings', () => {
   try {
-    return mcpConfigStore.getServers();
+    return mcpConfigStore.getServersForSettings();
   } catch (error) {
     logError('[MCP] Error getting servers:', error);
-    return [];
+    throw error;
   }
 });
 
@@ -2843,6 +2898,16 @@ ipcMain.handle('remote.updateFeishuConfig', async (_event, config: FeishuChannel
   }
 });
 
+ipcMain.handle('remote.updateSlackConfig', async (_event, config: SlackChannelConfig | null) => {
+  try {
+    await remoteManager.updateSlackConfig(config);
+    return { success: true };
+  } catch (error) {
+    logError('[Remote] Error updating Slack config:', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+});
+
 ipcMain.handle('remote.getPairedUsers', () => {
   try {
     return remoteManager.getPairedUsers();
@@ -3070,6 +3135,34 @@ ipcMain.handle('memory.clearCoreMemory', () => {
   return memoryService.clearCoreMemory();
 });
 
+ipcMain.handle('memory.getCoreEntries', () => {
+  if (!memoryService) {
+    throw new Error('Memory service not initialized');
+  }
+  return memoryService.getCoreEntries();
+});
+
+ipcMain.handle('memory.writeCoreEntry', (_event, combinedKey: string, value: string) => {
+  if (!memoryService) {
+    throw new Error('Memory service not initialized');
+  }
+  return memoryService.writeCoreEntry(combinedKey, value);
+});
+
+ipcMain.handle('memory.forgetCoreEntry', (_event, combinedKey: string) => {
+  if (!memoryService) {
+    throw new Error('Memory service not initialized');
+  }
+  return memoryService.forgetCoreEntry(combinedKey);
+});
+
+ipcMain.handle('memory.forgetSession', (_event, sessionId: string) => {
+  if (!memoryService) {
+    throw new Error('Memory service not initialized');
+  }
+  return memoryService.forgetSession(sessionId);
+});
+
 ipcMain.handle('memory.rebuildAll', async () => {
   if (!memoryService) {
     throw new Error('Memory service not initialized');
@@ -3235,6 +3328,9 @@ async function handleClientEvent(event: ClientEvent): Promise<unknown> {
 
     case 'session.delete':
       return sm.deleteSession(event.payload.sessionId);
+
+    case 'session.rename':
+      return sm.renameSession(event.payload.sessionId, event.payload.title);
 
     case 'session.batchDelete':
       return sm.batchDeleteSessions(event.payload.sessionIds);
