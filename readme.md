@@ -110,10 +110,13 @@ brew install --cask --no-quarantine open-cowork
 
 Get the latest version from our [Releases Page](https://github.com/OpenCoworkAI/open-cowork/releases).
 
-| Platform                  | File Type |
-| ------------------------- | --------- |
-| **Windows**               | `.exe`    |
-| **macOS** (Apple Silicon) | `.dmg`    |
+| Platform                  | File Type                          |
+| ------------------------- | ---------------------------------- |
+| **Windows**               | `.exe`                             |
+| **macOS** (Apple Silicon) | `.dmg` (`Open.Cowork-*-mac-arm64`) |
+| **macOS** (Intel)         | `.dmg` (`Open.Cowork-*-mac-x64`)   |
+
+The Homebrew cask is Apple Silicon only (`depends_on arch: :arm64`). Intel Macs should download the `-mac-x64` DMG. Published DMGs stay unsigned unless a Developer ID is configured for the release; the Homebrew `--no-quarantine` flag above skips the Gatekeeper warning for that cask.
 
 ### Option 3: Build from Source
 

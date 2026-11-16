@@ -7,6 +7,7 @@ directories:
   buildResources: resources
 
 npmRebuild: true
+beforePack: ./scripts/before-pack.js
 afterPack: ./scripts/after-pack.js
 afterAllArtifactBuild: ./scripts/compress-dmg.js
 
@@ -57,6 +58,9 @@ files:
 # natives plus @silvia-odwyer/photon-node (wasm). worker_threads cannot execute a
 # script from inside app.asar, and ESM import() does not use the asar fs patch,
 # so the worker script and those packages must live in app.asar.unpacked.
+# The current agent uses photon-node (wasm, same file on Apple Silicon and Intel).
+# When sharp is installed, scripts/rebuild-native.js installs the matching @img
+# prebuild and afterPack removes the other architecture's @img packages.
 # Note: MCP servers are bundled with esbuild (all deps inlined), so no need to unpack MCP SDK
 asarUnpack:
   - '**/image-resize-worker*.js'
@@ -89,10 +93,19 @@ win:
 
 mac:
   icon: resources/icon.icns
+  # `npm run build` honors this list and packages both Mac installers.
+  # `electron-builder --mac dmg dir` does not: a CLI target without an arch
+  # suffix builds only the host. Release CI calls scripts/package-macos.sh,
+  # which passes dmg:<arch> and dir:<arch> separately.
+  # Hosted release runners set CSC_IDENTITY_AUTO_DISCOVERY=false, so the
+  # published DMGs are unsigned. Developer ID signing needs a CSC identity.
+  # scripts/notarize.js runs only when APPLE_ID, APPLE_ID_PASSWORD, and
+  # APPLE_TEAM_ID are set, and it is not hooked from this file.
   target:
     - target: dir
       arch:
         - arm64
+        - x64
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
   identity: auto
   hardenedRuntime: true

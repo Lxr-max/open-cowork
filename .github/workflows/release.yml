@@ -41,7 +41,18 @@ jobs:
   build-macos:
     name: Release macOS
     needs: [lint-and-test]
-    runs-on: macos-14
+    # macos-14 images were removed in November 2026. macos-15 is still Apple
+    # Silicon, and the published DMG name stays *-mac-arm64.dmg.
+    # Signing stays off on hosted runners: CSC_IDENTITY_AUTO_DISCOVERY=false.
+    # Developer ID signing needs a CSC identity. scripts/notarize.js also needs
+    # APPLE_ID, APPLE_ID_PASSWORD, and APPLE_TEAM_ID, and it is not hooked into
+    # electron-builder.yml. These hosted runners have no notarization secrets.
+    # The Intel DMG is cross-built here and launch-smoked under Rosetta before
+    # it is uploaded. build-macos-intel repeats that package on macos-15-intel
+    # and does not upload a second file. Intel runners are available through
+    # August 2027 and have a 14 GB disk, so the arm64 app is deleted after its
+    # DMG is already on the draft release.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -59,18 +70,24 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+        env:
+          # postinstall downloads Node. Keep this phase on arm64; x64 is fetched
+          # after the Apple Silicon DMG is uploaded.
+          OPEN_COWORK_NODE_ARCHES: arm64
 
       - name: Install cliclick for GUI tools
         run: brew install cliclick
 
-      - name: Download Node binaries
+      - name: Download Apple Silicon Node binary
         run: node scripts/download-node.js
+        env:
+          OPEN_COWORK_NODE_ARCHES: arm64
 
-      - name: Prepare Python runtime
-        run: node scripts/prepare-python.js
+      - name: Prepare Apple Silicon Python runtime
+        run: node scripts/prepare-python.js --arch arm64
 
-      - name: Prepare GUI tools
-        run: node scripts/prepare-gui-tools.js
+      - name: Prepare Apple Silicon GUI tools
+        run: node scripts/prepare-gui-tools.js --arch arm64
 
       - name: Build Lima agent
         run: npm run build:lima-agent
@@ -84,86 +101,124 @@ jobs:
       - name: Vite build
         run: npx vite build
 
-      - name: Electron Builder (unsigned)
-        run: npx electron-builder --mac dmg dir --publish never
+      - name: Package Apple Silicon app
+        run: bash scripts/package-macos.sh arm64
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      # Verify critical resources are present in the packaged app
-      - name: Smoke test - verify packaged resources
-        run: |
-          set -euo pipefail
-          APP_DIR="release/mac-arm64"
-          APP_NAME=$(ls "$APP_DIR" | grep '\.app$' | head -1)
-          if [ -z "$APP_NAME" ]; then
-            echo "::error::No .app bundle found in $APP_DIR"
-            exit 1
-          fi
-          RESOURCES="$APP_DIR/$APP_NAME/Contents/Resources"
-          echo "Checking resources in: $RESOURCES"
+      - name: Smoke test - launch Apple Silicon app
+        run: bash scripts/smoke-macos-app.sh release/mac-arm64
 
-          FAILED=0
-          for check in \
-            "mcp/gui-operate-server.js" \
-            "mcp/software-dev-server-example.js" \
-            "node/bin/node" \
-            "lima-agent/index.js" \
-            "skills"; do
-            if [ -e "$RESOURCES/$check" ]; then
-              echo "  OK: $check"
-            else
-              echo "::error::Missing resource: $check"
-              FAILED=1
-            fi
-          done
-
-          if [ "$FAILED" -eq 1 ]; then
-            echo "::error::Packaged app is missing critical resources"
-            exit 1
-          fi
-          echo "All packaged resources verified."
-
-      - name: Smoke test - launch app
-        run: |
-          set -euo pipefail
-          APP_DIR="release/mac-arm64"
-          APP_NAME=$(ls "$APP_DIR" | grep '\.app$' | head -1)
-          if [ -z "$APP_NAME" ]; then
-            echo "::error::No .app bundle found"
-            exit 1
-          fi
-          EXECUTABLE="$APP_DIR/$APP_NAME/Contents/MacOS/$(echo "$APP_NAME" | sed 's/\.app$//')"
-          echo "Launching: $EXECUTABLE --smoke-test"
-          # macOS runners may not have coreutils timeout; fall back to no timeout
-          if command -v gtimeout >/dev/null 2>&1; then
-            gtimeout 30 "$EXECUTABLE" --smoke-test 2>&1 || EXIT_CODE=$?
-          elif command -v timeout >/dev/null 2>&1; then
-            timeout 30 "$EXECUTABLE" --smoke-test 2>&1 || EXIT_CODE=$?
-          else
-            "$EXECUTABLE" --smoke-test 2>&1 &
-            APP_PID=$!
-            sleep 30
-            if kill -0 "$APP_PID" 2>/dev/null; then
-              kill "$APP_PID"
-              echo "::error::Launch smoke test timed out after 30s"
-              exit 1
-            fi
-            wait "$APP_PID" || EXIT_CODE=$?
-          fi
-          if [ "${EXIT_CODE:-0}" -eq 0 ]; then
-            echo "Launch smoke test passed"
-          else
-            echo "::error::Launch smoke test failed with exit code ${EXIT_CODE}"
-            exit 1
-          fi
-
-      - name: Upload to GitHub Release
+      - name: Upload Apple Silicon DMG
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v2
         with:
-          files: |
-            release/*.dmg
-            release/*.zip
+          files: release/*-mac-arm64.dmg
           draft: true
+
+      - name: Free disk before the Intel package
+        run: rm -rf release/mac-arm64 release/*-mac-arm64.dmg release/*-mac-arm64.zip
+
+      - name: Download Intel Node binary
+        run: node scripts/download-node.js
+        env:
+          OPEN_COWORK_NODE_ARCHES: x64
+
+      - name: Prepare Intel Python runtime
+        run: node scripts/prepare-python.js --arch x64
+
+      - name: Prepare Intel GUI tools
+        run: node scripts/prepare-gui-tools.js --arch x64
+
+      - name: Package Intel app
+        run: bash scripts/package-macos.sh x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Smoke test - launch Intel app under Rosetta
+        run: |
+          set -euo pipefail
+          softwareupdate --install-rosetta --agree-to-license || true
+          if ! arch -x86_64 /usr/bin/true; then
+            echo "::error::Rosetta is not available, so the Intel app cannot be launch-smoked here. The macos-15-intel job runs the same package natively and does not publish a second DMG."
+            exit 1
+          fi
+          bash scripts/smoke-macos-app.sh release/mac-x64 rosetta
+
+      - name: Upload Intel DMG
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v2
+        with:
+          files: release/*-mac-x64.dmg
+          draft: true
+
+  build-macos-intel:
+    name: Release macOS Intel (native check)
+    needs: [lint-and-test]
+    # Native proof for the x64 package. This job does not upload: the published
+    # Intel DMG is the one cross-built on the Apple Silicon runner after the
+    # Rosetta smoke test. A failure here does not delete artifacts that job
+    # already uploaded. Hosted Intel runners have no Apple signing secrets, so
+    # this package is unsigned as well. Hardened runtime applies only when a
+    # Developer ID identity is present.
+    runs-on: macos-15-intel
+    steps:
+      - name: Confirm Intel hardware
+        run: |
+          machine="$(uname -m)"
+          echo "uname -m=${machine}"
+          test "$machine" = "x86_64"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Cache Electron
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/Library/Caches/electron
+          key: electron-mac-x64-${{ hashFiles('package-lock.json') }}
+          restore-keys: electron-mac-x64-
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          OPEN_COWORK_NODE_ARCHES: x64
+
+      - name: Install cliclick for GUI tools
+        run: brew install cliclick
+
+      - name: Download Intel Node binary
+        run: node scripts/download-node.js
+        env:
+          OPEN_COWORK_NODE_ARCHES: x64
+
+      - name: Prepare Intel Python runtime
+        run: node scripts/prepare-python.js --arch x64
+
+      - name: Prepare Intel GUI tools
+        run: node scripts/prepare-gui-tools.js --arch x64
+
+      - name: Build Lima agent
+        run: npm run build:lima-agent
+
+      - name: Build MCP servers
+        run: npm run build:mcp
+
+      - name: TypeScript compile
+        run: npx tsc
+
+      - name: Vite build
+        run: npx vite build
+
+      - name: Package Intel app
+        run: bash scripts/package-macos.sh x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Smoke test - launch Intel app natively
+        run: bash scripts/smoke-macos-app.sh release/mac-x64
 
   build-windows:
     name: Release Windows

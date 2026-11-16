@@ -10,7 +10,10 @@ permissions:
 jobs:
   update-cask:
     name: Update Cask Formula
-    runs-on: macos-14
+    # macos-14 images were removed in November 2026. The cask stays Apple
+    # Silicon only (`depends_on arch: :arm64`). Intel users download
+    # Open.Cowork-<version>-mac-x64.dmg; this job does not hash that file.
+    runs-on: macos-15
     if: contains(github.ref_name, 'v')
     steps:
       - name: Extract version from tag

@@ -28,6 +28,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { orderPythonArches, pipPythonCandidates } = require('./macos-packaging');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
 const OUTPUT_ROOT = path.join(PROJECT_ROOT, 'resources', 'python');
@@ -37,24 +38,25 @@ const DOWNLOAD_DIR = path.join(OUTPUT_ROOT, '.downloads');
 const PYTHON_MINOR = process.env.OPEN_COWORK_PYTHON_MINOR || '3.10';
 const ABI = `cp${PYTHON_MINOR.replace('.', '')}`; // e.g. 3.12 -> cp312
 
-const GITHUB_REPO = process.env.OPEN_COWORK_PYTHON_STANDALONE_REPO || 'astral-sh/python-build-standalone';
+const GITHUB_REPO =
+  process.env.OPEN_COWORK_PYTHON_STANDALONE_REPO || 'astral-sh/python-build-standalone';
 const RUNTIME_VERSION_FILENAME = 'runtime-version.txt';
-const BUNDLED_GUI_PACKAGES = [
-  'pillow',
-  'pyobjc-framework-Quartz',
-];
+const BUNDLED_GUI_PACKAGES = ['pillow', 'pyobjc-framework-Quartz'];
 const BUNDLED_RUNTIME_FINGERPRINT = BUNDLED_GUI_PACKAGES.join('|');
 // Use the correct GitHub API endpoint (v3, no trailing slash)
 const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30`;
 
 // Default URLs are only used for the checked-in default minor.
 // Other minors fall back to the GitHub releases API or explicit env overrides.
-const DEFAULT_PYTHON_URLS = PYTHON_MINOR === '3.10'
-  ? {
-      'aarch64-apple-darwin': 'https://github.com/astral-sh/python-build-standalone/releases/download/20260203/cpython-3.10.19+20260203-aarch64-apple-darwin-install_only.tar.gz',
-      'x86_64-apple-darwin': 'https://github.com/astral-sh/python-build-standalone/releases/download/20260203/cpython-3.10.19+20260203-x86_64-apple-darwin-install_only.tar.gz',
-    }
-  : {};
+const DEFAULT_PYTHON_URLS =
+  PYTHON_MINOR === '3.10'
+    ? {
+        'aarch64-apple-darwin':
+          'https://github.com/astral-sh/python-build-standalone/releases/download/20260203/cpython-3.10.19+20260203-aarch64-apple-darwin-install_only.tar.gz',
+        'x86_64-apple-darwin':
+          'https://github.com/astral-sh/python-build-standalone/releases/download/20260203/cpython-3.10.19+20260203-x86_64-apple-darwin-install_only.tar.gz',
+      }
+    : {};
 
 const TARGETS = {
   darwin: {
@@ -190,24 +192,20 @@ function findExistingArchive(triple) {
 
   const wantedPrefix = `cpython-${PYTHON_MINOR}`;
   const files = fs.readdirSync(DOWNLOAD_DIR);
-  
+
   for (const file of files) {
     const filePath = path.join(DOWNLOAD_DIR, file);
     // Skip if not a file or not an archive
     if (!fs.statSync(filePath).isFile()) continue;
     if (!file.endsWith('.tar.gz') && !file.endsWith('.tar.zst')) continue;
-    
+
     // Check if filename matches our criteria
-    if (
-      file.includes(wantedPrefix) &&
-      file.includes(triple) &&
-      file.includes('install_only')
-    ) {
+    if (file.includes(wantedPrefix) && file.includes(triple) && file.includes('install_only')) {
       console.log(`[prepare:python] Found existing archive: ${file}`);
       return filePath;
     }
   }
-  
+
   return null;
 }
 
@@ -230,13 +228,17 @@ async function findStandaloneAssetUrl(triple, envUrlKey) {
   // 3. Use default hardcoded URLs (fast, no API call needed)
   const defaultUrl = DEFAULT_PYTHON_URLS[triple];
   if (defaultUrl) {
-    console.log(`[prepare:python] Using default URL for ${triple}: ${defaultUrl.substring(0, 80)}...`);
+    console.log(
+      `[prepare:python] Using default URL for ${triple}: ${defaultUrl.substring(0, 80)}...`
+    );
     return defaultUrl;
   }
 
   // 4. Fallback: Try GitHub API (only if no default URL available)
   try {
-    console.log(`[prepare:python] No default URL for ${triple}, fetching from GitHub API: ${RELEASES_API}`);
+    console.log(
+      `[prepare:python] No default URL for ${triple}, fetching from GitHub API: ${RELEASES_API}`
+    );
     const releases = await fetchJson(RELEASES_API);
     if (!Array.isArray(releases)) {
       throw new Error(`Unexpected GitHub API response: expected array, got ${typeof releases}`);
@@ -323,10 +325,40 @@ function ensurePipAvailable(pythonBin) {
   }
 }
 
-function installPackages(siteDir, platformTag, pythonBin) {
-  ensureDir(siteDir);
+function isRunnablePython(pythonBin) {
+  if (!pythonBin) return false;
+  if (pythonBin.includes(path.sep) && !exists(pythonBin)) return false;
+  try {
+    execSync(`${JSON.stringify(pythonBin)} -c "import sys"`, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-  const pipPython = process.env.OPEN_COWORK_PIP_PYTHON || pythonBin;
+function siblingPythonBins(platform, arch) {
+  return Object.keys(TARGETS[platform] || {})
+    .filter((other) => other !== arch)
+    .map((other) => path.join(OUTPUT_ROOT, `${platform}-${other}`, 'bin', 'python3'));
+}
+
+function choosePipPython(platform, arch, targetPython) {
+  const candidates = pipPythonCandidates({
+    envPython: process.env.OPEN_COWORK_PIP_PYTHON,
+    targetPython,
+    siblingPythons: [...siblingPythonBins(platform, arch), 'python3'],
+    systemPython: '/usr/bin/python3',
+  });
+  for (const candidate of candidates) {
+    if (isRunnablePython(candidate)) return candidate;
+  }
+  throw new Error(
+    `No runnable Python interpreter found to install ${platform}-${arch} wheels. Tried: ${candidates.join(', ')}`
+  );
+}
+
+function installPackages(siteDir, platformTag, pipPython) {
+  ensureDir(siteDir);
   const packageSpecs = [...BUNDLED_GUI_PACKAGES];
   const pythonRoot = path.resolve(siteDir, '..');
   const runtimeMarkerFile = resolveRuntimeVersionFile(pythonRoot);
@@ -342,7 +374,9 @@ function installPackages(siteDir, platformTag, pythonBin) {
     return;
   }
 
-  console.log(`📦 Installing Python packages into ${siteDir} (platform=${platformTag})...`);
+  console.log(
+    `📦 Installing Python packages into ${siteDir} (platform=${platformTag}, pip=${pipPython})...`
+  );
   ensurePipAvailable(pipPython);
 
   // Install wheels into a target directory (no need to run the bundled python)
@@ -369,10 +403,18 @@ function cleanPythonRuntime(destDir, siteDir) {
 
   // --- 1. Clean site-packages: keep only whitelisted packages ---
   const SITE_PACKAGES_WHITELIST = new Set([
-    'PIL', 'Pillow', 'Pillow.libs',
-    'Quartz', 'AppKit', 'Foundation', 'CoreFoundation',
-    'objc', 'PyObjCTools',
-    'pyobjc_core', 'pyobjc_framework_Cocoa', 'pyobjc_framework_Quartz',
+    'PIL',
+    'Pillow',
+    'Pillow.libs',
+    'Quartz',
+    'AppKit',
+    'Foundation',
+    'CoreFoundation',
+    'objc',
+    'PyObjCTools',
+    'pyobjc_core',
+    'pyobjc_framework_Cocoa',
+    'pyobjc_framework_Quartz',
   ]);
 
   // Match package dirs and their .dist-info counterparts
@@ -402,7 +444,8 @@ function cleanPythonRuntime(destDir, siteDir) {
       try {
         const stat = fs.statSync(entryPath);
         const size = stat.isDirectory()
-          ? parseInt(execSync(`du -sk "${entryPath}"`, { encoding: 'utf8' }).split('\t')[0], 10) * 1024
+          ? parseInt(execSync(`du -sk "${entryPath}"`, { encoding: 'utf8' }).split('\t')[0], 10) *
+            1024
           : stat.size;
         fs.rmSync(entryPath, { recursive: true, force: true });
         removedCount++;
@@ -411,13 +454,17 @@ function cleanPythonRuntime(destDir, siteDir) {
         // Ignore errors during cleanup
       }
     }
-    console.log(`  ✓ site-packages: removed ${removedCount} items (~${Math.round(removedBytes / 1024 / 1024)}MB)`);
+    console.log(
+      `  ✓ site-packages: removed ${removedCount} items (~${Math.round(removedBytes / 1024 / 1024)}MB)`
+    );
   }
 
   // --- 2. Clean __pycache__ and .pyc files ---
   // Note: execSync with controlled build-time paths (not user input)
   try {
-    execSync(`find "${destDir}" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true`, { stdio: 'ignore' });
+    execSync(`find "${destDir}" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true`, {
+      stdio: 'ignore',
+    });
     execSync(`find "${destDir}" -name "*.pyc" -delete 2>/dev/null || true`, { stdio: 'ignore' });
     console.log(`  ✓ Removed __pycache__ and .pyc files`);
   } catch {
@@ -428,7 +475,7 @@ function cleanPythonRuntime(destDir, siteDir) {
   const libDir = path.join(destDir, 'lib');
   // Find the pythonX.Y directory
   const pythonLibDirs = fs.existsSync(libDir)
-    ? fs.readdirSync(libDir).filter(d => d.startsWith('python'))
+    ? fs.readdirSync(libDir).filter((d) => d.startsWith('python'))
     : [];
 
   for (const pyDir of pythonLibDirs) {
@@ -443,28 +490,35 @@ function cleanPythonRuntime(destDir, siteDir) {
     }
     // Remove turtle* files
     try {
-      const turtleFiles = fs.readdirSync(stdlibDir).filter(f => f.startsWith('turtle'));
+      const turtleFiles = fs.readdirSync(stdlibDir).filter((f) => f.startsWith('turtle'));
       for (const f of turtleFiles) {
         fs.rmSync(path.join(stdlibDir, f), { recursive: true, force: true });
       }
       if (turtleFiles.length > 0) console.log(`  ✓ Removed turtle* (${turtleFiles.length} items)`);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   // --- 4. Remove Tcl/Tk libraries ---
   if (exists(libDir)) {
-    const tclTkDirs = fs.readdirSync(libDir).filter(d => d.startsWith('tcl') || d.startsWith('tk'));
+    const tclTkDirs = fs
+      .readdirSync(libDir)
+      .filter((d) => d.startsWith('tcl') || d.startsWith('tk'));
     for (const d of tclTkDirs) {
       fs.rmSync(path.join(libDir, d), { recursive: true, force: true });
     }
-    if (tclTkDirs.length > 0) console.log(`  ✓ Removed Tcl/Tk libraries (${tclTkDirs.length} dirs)`);
+    if (tclTkDirs.length > 0)
+      console.log(`  ✓ Removed Tcl/Tk libraries (${tclTkDirs.length} dirs)`);
   }
 
   // Report final size
   try {
     const sizeStr = execSync(`du -sh "${destDir}"`, { encoding: 'utf8' }).split('\t')[0];
     console.log(`  📦 Python runtime size after cleanup: ${sizeStr}`);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 async function preparePlatformArch(platform, arch) {
@@ -512,8 +566,11 @@ async function preparePlatformArch(platform, arch) {
     console.log(`✓ Standalone Python already present: ${pythonBin}`);
   }
 
-  // Install packages for GUI automation
-  installPackages(siteDir, target.platformTag, pythonBin);
+  // Install packages for GUI automation. An x86_64 CPython cannot be executed
+  // on Apple Silicon without Rosetta, so pip runs on a host interpreter and
+  // selects the target wheels with --platform.
+  const pipPython = choosePipPython(platform, arch, pythonBin);
+  installPackages(siteDir, target.platformTag, pipPython);
 
   // Clean site-packages of non-whitelisted packages (also runs after pip install)
   cleanPythonRuntime(destDir, siteDir);
@@ -545,8 +602,9 @@ async function main() {
     );
   }
 
+  // Host arch first so its interpreter exists before a cross-arch pip install.
   const arches = wantsAll
-    ? supportedArches
+    ? orderPythonArches(supportedArches, currentArch)
     : requestedArch
       ? [requestedArch]
       : [supportedArches.includes(currentArch) ? currentArch : supportedArches[0]];
@@ -558,7 +616,11 @@ async function main() {
   console.log('✅ Bundled Python prepared.');
 }
 
-main().catch((err) => {
-  console.error('\n[prepare:python] ERROR:', err && err.message ? err.message : err);
-  process.exitCode = 1;
-});
+module.exports = { choosePipPython, isRunnablePython, siblingPythonBins };
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('\n[prepare:python] ERROR:', err && err.message ? err.message : err);
+    process.exitCode = 1;
+  });
+}

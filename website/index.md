@@ -132,7 +132,7 @@ features:
 
 ## Quick Install
 
-**macOS (Homebrew)**
+**macOS (Homebrew, Apple Silicon)**
 
 ```bash
 brew tap OpenCoworkAI/tap
@@ -140,6 +140,8 @@ brew install --cask --no-quarantine open-cowork
 ```
 
 **Windows / macOS** — [Download from Releases →](https://github.com/OpenCoworkAI/open-cowork/releases)
+
+Releases include an Apple Silicon DMG (`-mac-arm64`) and an Intel DMG (`-mac-x64`). The Homebrew cask is Apple Silicon only.
 
 </div>
 

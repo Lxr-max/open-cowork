@@ -178,18 +178,39 @@ function runChecks(rootDir, platform, arch) {
 }
 
 /**
+ * Architectures that `npm run build` packages on this OS.
+ * macOS installers are produced for Apple Silicon and Intel.
+ */
+function packagingArches(platform, hostArch = process.arch) {
+  if (platform === 'darwin') return ['arm64', 'x64'];
+  return [hostArch];
+}
+
+/**
  * CLI entry point: run checks against the project root and exit with appropriate code.
  */
 function main() {
   const PROJECT_ROOT = path.join(__dirname, '..');
+  const arches = packagingArches(process.platform);
 
   console.log('\nRunning pre-build checks...\n');
 
-  const { passed, warnings, failed, hasFatal } = runChecks(PROJECT_ROOT, process.platform);
+  let passed = 0;
+  let warnings = 0;
+  let failed = 0;
+  let hasFatal = false;
+  for (const arch of arches) {
+    if (arches.length > 1) {
+      console.log(`\nChecking ${process.platform}-${arch}`);
+    }
+    const result = runChecks(PROJECT_ROOT, process.platform, arch);
+    passed += result.passed;
+    warnings += result.warnings;
+    failed += result.failed;
+    hasFatal = hasFatal || result.hasFatal;
+  }
 
-  console.log(
-    `\nPre-build check: ${passed} passed, ${warnings} warnings, ${failed} failed`
-  );
+  console.log(`\nPre-build check: ${passed} passed, ${warnings} warnings, ${failed} failed`);
 
   if (hasFatal) {
     console.log(
@@ -202,7 +223,7 @@ function main() {
   process.exit(0);
 }
 
-module.exports = { runChecks, buildCheckList };
+module.exports = { runChecks, buildCheckList, packagingArches };
 
 if (require.main === module) {
   main();

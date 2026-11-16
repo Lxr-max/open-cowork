@@ -102,10 +102,13 @@ brew install --cask --no-quarantine open-cowork
 
 请访问我们的 [Release 页面](https://github.com/OpenCoworkAI/open-cowork/releases) 下载最新版本。
 
-| 平台                      | 文件类型 |
-| ------------------------- | -------- |
-| **Windows**               | `.exe`   |
-| **macOS** (Apple Silicon) | `.dmg`   |
+| 平台                      | 文件类型                            |
+| ------------------------- | ----------------------------------- |
+| **Windows**               | `.exe`                              |
+| **macOS** (Apple Silicon) | `.dmg`（`Open.Cowork-*-mac-arm64`） |
+| **macOS** (Intel)         | `.dmg`（`Open.Cowork-*-mac-x64`）   |
+
+Homebrew cask 仅支持 Apple Silicon（`depends_on arch: :arm64`）。Intel Mac 请下载 `-mac-x64` DMG。发布的 DMG 在未配置 Developer ID 时保持未签名；上面的 Homebrew `--no-quarantine` 用于跳过该 cask 的 Gatekeeper 提示。
 
 ### 方式三：源码编译
 

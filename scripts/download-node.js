@@ -81,24 +81,26 @@ function download(url, dest) {
   return new Promise((resolve, reject) => {
     console.log(`Downloading: ${url}`);
     const file = fs.createWriteStream(dest);
-    https.get(url, (response) => {
-      if (response.statusCode === 302 || response.statusCode === 301) {
-        // Follow redirect
-        return download(response.headers.location, dest).then(resolve).catch(reject);
-      }
-      if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download: ${response.statusCode}`));
-        return;
-      }
-      response.pipe(file);
-      file.on('finish', () => {
-        file.close();
-        resolve();
+    https
+      .get(url, (response) => {
+        if (response.statusCode === 302 || response.statusCode === 301) {
+          // Follow redirect
+          return download(response.headers.location, dest).then(resolve).catch(reject);
+        }
+        if (response.statusCode !== 200) {
+          reject(new Error(`Failed to download: ${response.statusCode}`));
+          return;
+        }
+        response.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          resolve();
+        });
+      })
+      .on('error', (err) => {
+        fs.unlink(dest, () => {});
+        reject(err);
       });
-    }).on('error', (err) => {
-      fs.unlink(dest, () => {});
-      reject(err);
-    });
   });
 }
 
@@ -118,8 +120,9 @@ function removeFileWithRetries(filePath) {
       return;
     } catch (error) {
       lastError = error;
-      const isRetryableWindowsError = process.platform === 'win32'
-        && (error.code === 'EPERM' || error.code === 'EBUSY' || error.code === 'ENOTEMPTY');
+      const isRetryableWindowsError =
+        process.platform === 'win32' &&
+        (error.code === 'EPERM' || error.code === 'EBUSY' || error.code === 'ENOTEMPTY');
       if (!isRetryableWindowsError || attempt === WINDOWS_UNLINK_RETRY_COUNT) {
         throw error;
       }
@@ -176,7 +179,10 @@ async function downloadAndExtract(platform, arch) {
       const isWindows = process.platform === 'win32';
       if (isWindows) {
         // PowerShell on Windows
-        execSync(`powershell -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${extractDir}' -Force"`, { stdio: 'inherit' });
+        execSync(
+          `powershell -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${extractDir}' -Force"`,
+          { stdio: 'inherit' }
+        );
       } else {
         // unzip on Unix
         execSync(`unzip -q "${archivePath}" -d "${extractDir}"`, { stdio: 'inherit' });
@@ -185,7 +191,7 @@ async function downloadAndExtract(platform, arch) {
       const innerDir = path.join(extractDir, nodeName);
       if (fs.existsSync(innerDir)) {
         const files = fs.readdirSync(innerDir);
-        files.forEach(file => {
+        files.forEach((file) => {
           fs.renameSync(path.join(innerDir, file), path.join(extractDir, file));
         });
         fs.rmdirSync(innerDir);
@@ -193,7 +199,9 @@ async function downloadAndExtract(platform, arch) {
     } else {
       // Use tar for Unix packages
       // Note: On Windows, extracting Unix tar.gz may fail due to symlinks - that's OK
-      execSync(`tar -xzf "${archivePath}" -C "${extractDir}" --strip-components=1`, { stdio: 'inherit' });
+      execSync(`tar -xzf "${archivePath}" -C "${extractDir}" --strip-components=1`, {
+        stdio: 'inherit',
+      });
     }
 
     // Clean up archive
@@ -241,26 +249,22 @@ async function downloadAndExtract(platform, arch) {
     if (fs.existsSync(extractDir)) {
       fs.rmSync(extractDir, { recursive: true, force: true });
     }
+    throw error;
   }
 }
 
 async function main() {
   console.log('Downloading Node.js binaries...\n');
 
+  const { archesToDownload } = require('./macos-packaging');
   const downloads = [];
   const platformsToDownload = DOWNLOAD_ALL_PLATFORMS
     ? Object.entries(PLATFORMS)
     : [[process.platform, PLATFORMS[process.platform] || {}]];
 
-  if (!DOWNLOAD_ALL_PLATFORMS) {
-    console.log(`Current platform only: ${process.platform}-${process.arch}`);
-  }
-
   for (const [platform, arches] of platformsToDownload) {
-    const archList = DOWNLOAD_ALL_PLATFORMS
-      ? Object.keys(arches)
-      : [process.arch];
-
+    const archList = archesToDownload(platform, Object.keys(arches));
+    console.log(`Node.js binaries for ${platform}: ${archList.join(', ') || '(none)'}`);
     for (const arch of archList) {
       downloads.push(downloadAndExtract(platform, arch));
     }
@@ -270,4 +274,11 @@ async function main() {
   console.log('\n✓ All Node.js binaries downloaded!');
 }
 
-main().catch(console.error);
+module.exports = { PLATFORMS, NODE_VERSION };
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
